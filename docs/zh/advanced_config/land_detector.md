@@ -92,7 +92,7 @@ Tuning parameters for fixed-wing land detection:
 - [LNDFW_TRIG_TIME](../advanced_config/parameter_reference.md#LNDFW_TRIG_TIME) - Trigger time during which the conditions above have to be fulfilled to declare a landing.
 
 :::info
-When FW launch detection is enabled ([FW_LAUN_DETCN_ON](../advanced_config/parameter_reference.md#FW_LAUN_DETCN_ON)), the vehicle will stay in "landed" state until takeoff is detected (which is purely based on acceleration and not velocity).
+When the fixed-wing takeoff method ([FW_TKOFF_METHOD](../advanced_config/parameter_reference.md#FW_TKOFF_METHOD)) is set to launch detection, the vehicle will stay in "landed" state until takeoff is detected (which is purely based on acceleration and not velocity).
 :::
 
 ## VTOL Land Detector

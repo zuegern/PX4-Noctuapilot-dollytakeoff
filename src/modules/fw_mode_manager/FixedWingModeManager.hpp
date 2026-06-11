@@ -42,6 +42,7 @@
 
 #include "launchdetection/LaunchDetector.h"
 #include "runway_takeoff/RunwayTakeoff.h"
+#include "trolley_takeoff/TrolleyTakeoff.h"
 #include "ControllerConfigurationHandler.hpp"
 
 #include <float.h>
@@ -244,6 +245,16 @@ private:
 		STICK_CONFIG_ENABLE_AIRSPEED_SP_MANUAL_BIT = (1 << 1)
 	};
 
+	enum TakeoffMethod {
+		TAKEOFF_METHOD_DISABLED = 0,
+		TAKEOFF_METHOD_RUNWAY = 1,
+		TAKEOFF_METHOD_LAUNCH_DETECTION = 2,
+		TAKEOFF_METHOD_TROLLEY = 3
+	};
+
+	bool runwayTakeoffEnabled() const;
+	bool launchDetectionTakeoffEnabled() const;
+	bool trolleyTakeoffEnabled() const;
 
 	Sticks _sticks{this};
 
@@ -311,6 +322,9 @@ private:
 
 	// class handling runway takeoff for fixed-wing UAVs with steerable wheels
 	RunwayTakeoff _runway_takeoff;
+
+	// class handling trolley-assisted takeoff for fixed-wing UAVs
+	trolleytakeoff::TrolleyTakeoff _trolley_takeoff;
 
 	bool _skipping_takeoff_detection{false};
 
@@ -593,6 +607,18 @@ private:
 					 const float altitude_setpoint_amsl);
 
 	/**
+	 * @brief Raw trolley connection signal.
+	 *
+	 * This currently returns a safe placeholder until the pogo-pin input is wired into PX4.
+	 */
+	bool trolleyConnectionSignal() const;
+
+	/**
+	 * @brief Publishes conservative control setpoints after a bad trolley disconnect.
+	 */
+	void publishTrolleyTakeoffAbortSetpoints(const hrt_abstime &now);
+
+	/**
 	 * @brief Controls automatic landing with straight approach.
 	 *
 	 * To be used in Missions that contain a loiter down followed by a land waypoint.
@@ -783,6 +809,18 @@ private:
 					       const Vector2f &ground_vel, const Vector2f &wind_vel);
 
 	/*
+	 * Trolley takeoff path following logic. Uses the selected trolley path to provide either a straight
+	 * line or constant-radius path for closed-loop trolley steering.
+	 *
+	 * @param[in] start_pos_local Trolley takeoff start position in local coordinates. (N,E) [m]
+	 * @param[in] takeoff_bearing Initial takeoff bearing [rad] (from north)
+	 * @param[in] vehicle_pos Vehicle position in local coordinates. (N,E) [m]
+	 * @param[in] ground_vel Vehicle ground velocity vector [m/s]
+	 */
+	DirectionalGuidanceOutput navigateTrolleyPath(const Vector2f &start_pos_local, const float takeoff_bearing,
+			const Vector2f &vehicle_pos, const Vector2f &ground_vel);
+
+	/*
 	 * Loitering (unlimited) logic. Takes loiter center, radius, and direction and
 	 * determines the relevant parameters for evaluating the NPFG guidance law,
 	 * then updates control setpoints.
@@ -870,8 +908,8 @@ private:
 		(ParamFloat<px4::params::FW_GPSF_R>) _param_nav_gpsf_r,
 		(ParamFloat<px4::params::FW_T_SPDWEIGHT>) _param_t_spdweight,
 
-		// Launch detection parameters
-		(ParamBool<px4::params::FW_LAUN_DETCN_ON>) _param_fw_laun_detcn_on,
+		// Takeoff method parameters
+		(ParamInt<px4::params::FW_TKOFF_METHOD>) _param_fw_tkoff_method,
 		(ParamFloat<px4::params::FW_LAUN_CS_LK_DY>) _param_fw_laun_cs_lk_dy,
 
 		// external parameters

@@ -217,6 +217,23 @@ parameters:
       increment: 0.01
 - group: FW Auto Takeoff
   definitions:
+    FW_TKOFF_METHOD:
+      description:
+        short: Fixed-wing takeoff method
+        long: |-
+          Selects the assisted fixed-wing takeoff method.
+
+          Disabled keeps the default fixed-wing takeoff behavior. Runway uses landing gear wheel steering on the ground roll.
+          Launch detection is for hand- or catapult-launched vehicles. Trolley uses the trolley-assisted takeoff state machine.
+      type: enum
+      values:
+        0: Disabled
+        1: Runway
+        2: Launch detection
+        3: Trolley
+      default: 0
+      min: 0
+      max: 3
     FW_TKO_PITCH_MIN:
       description:
         short: Minimum pitch during takeoff
@@ -240,14 +257,6 @@ parameters:
       min: -1.0
       decimal: 1
       increment: 0.1
-    FW_LAUN_DETCN_ON:
-      description:
-        short: Fixed-wing launch detection
-        long: |-
-          Enables automatic launch detection based on measured acceleration. Use for hand- or catapult-launched vehicles.
-          Not compatible with runway takeoff.
-      type: boolean
-      default: 0
     FW_LAUN_CS_LK_DY:
       description:
         short: Control surface launch delay

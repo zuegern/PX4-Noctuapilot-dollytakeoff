@@ -1,0 +1,257 @@
+module_name: trolley_takeoff
+parameters:
+- group: Trolley Takeoff
+  definitions:
+    TROLLEY_MAX_THR:
+      description:
+        short: Throttle during trolley takeoff
+      type: float
+      default: 1.0
+      unit: norm
+      min: 0.0
+      max: 1.0
+      decimal: 2
+      increment: 0.01
+    TROLLEY_PSP:
+      description:
+        short: Pitch setpoint while attached to trolley
+        long: |-
+          Pitch setpoint before trolley release or takeoff rotation airspeed is reached.
+      type: float
+      default: 0.0
+      unit: deg
+      min: -10.0
+      max: 20.0
+      decimal: 1
+      increment: 0.5
+    TROLLEY_RAMP_TM:
+      description:
+        short: Throttle ramp up time for trolley takeoff
+      type: float
+      default: 2.0
+      unit: s
+      min: 1.0
+      max: 15.0
+      decimal: 2
+      increment: 0.1
+    TROLLEY_NUDGE:
+      description:
+        short: Enable yaw stick nudging during trolley ground roll
+        long: |-
+          Enables yaw stick nudging of the wheel steering command while trolley takeoff is active.
+      type: boolean
+      default: 1
+    TROLLEY_TK_COND:
+      description:
+        short: Trolley takeoff release condition
+        long: |-
+          Selects the condition that moves trolley takeoff from ground roll into climbout.
+
+          Airspeed is the normal fixed-wing takeoff behavior. Estimated ground speed and time are test-only options for trolley bench or push tests.
+      type: enum
+      values:
+        0: Airspeed
+        1: Estimated ground speed
+        2: Time since trolley takeoff start
+      default: 0
+      min: 0
+      max: 2
+    TROLLEY_ROT_ASPD:
+      description:
+        short: Trolley takeoff rotation airspeed
+        long: |-
+          The calibrated airspeed threshold during trolley ground roll when the plane should start rotating.
+          Must be less than the takeoff airspeed, otherwise it is capped at FW_TKO_AIRSPD.
+
+          If set <= 0.0, defaults to 0.9 * FW_TKO_AIRSPD.
+      type: float
+      default: -1.0
+      unit: m/s
+      min: -1.0
+      decimal: 1
+      increment: 0.1
+    TROLLEY_ROT_GSPD:
+      description:
+        short: Trolley takeoff rotation ground speed
+        long: |-
+          Estimated horizontal ground speed threshold for the test-only ground speed release condition.
+
+          This uses the local velocity estimate, not a wheel encoder. It can drift without external aiding and is only intended for testing.
+          Curved trolley motion can make the estimate worse because the IMU also measures lateral/centripetal acceleration.
+
+          If set <= 0.0, defaults to the same threshold as the airspeed condition.
+      type: float
+      default: -1.0
+      unit: m/s
+      min: -1.0
+      decimal: 1
+      increment: 0.1
+    TROLLEY_TK_TIME:
+      description:
+        short: Trolley takeoff release time
+        long: |-
+          Time from trolley takeoff start to enter climbout when TROLLEY_TK_COND is set to the test-only time condition.
+      type: float
+      default: 5.0
+      unit: s
+      min: 0.0
+      max: 120.0
+      decimal: 1
+      increment: 0.5
+    TROLLEY_ROT_TIME:
+      description:
+        short: Trolley takeoff rotation time
+        long: This is the time desired to linearly ramp in takeoff pitch constraints during trolley takeoff rotation.
+      type: float
+      default: 1.0
+      unit: s
+      min: 0.1
+      decimal: 1
+      increment: 0.1
+    TROLLEY_STR_MODE:
+      description:
+        short: Trolley steering mode
+        long: |-
+          Selects how the trolley wheel steering command is generated during trolley takeoff.
+
+          Heading hold is the default runway-style behavior and uses the existing fixed-wing wheel controller to hold the initial heading.
+          Closed-loop path tracking uses the local position estimate and PX4 path guidance to follow the selected straight or constant-radius trolley path.
+          Open-loop path directly commands the selected straight or constant-radius trolley path and is intended for no-GPS steering tests.
+      type: enum
+      values:
+        0: Heading hold
+        1: Closed-loop path tracking
+        2: Open-loop path
+      default: 0
+      min: 0
+      max: 2
+    TROLLEY_PATH:
+      description:
+        short: Trolley steering path
+        long: |-
+          Selects the trolley steering path used while the aircraft is attached to the trolley.
+      type: enum
+      values:
+        0: Straight
+        1: Constant radius right turn
+        2: Constant radius left turn
+      default: 0
+      min: 0
+      max: 2
+    TROLLEY_RADIUS:
+      description:
+        short: Trolley turn radius
+        long: |-
+          Turn radius for the constant-radius trolley path of the PX4 position reference point on the trolley centerline.
+
+          This is not the radius of the inner or outer wheel. If this is set smaller than the radius physically possible with TROLLEY_WB, TROLLEY_REF_X, and TROLLEY_STR_MAX, the controller uses the minimum possible radius instead.
+          Steering angle is calculated from the rear-axle centerline radius using a bicycle model.
+      type: float
+      default: 10.0
+      unit: m
+      min: 0.1
+      max: 200.0
+      decimal: 2
+      increment: 0.1
+    TROLLEY_WB:
+      description:
+        short: Trolley wheelbase
+        long: Distance between the front steering axle and the rear axle.
+      type: float
+      default: 0.94
+      unit: m
+      min: 0.01
+      max: 20.0
+      decimal: 3
+      increment: 0.01
+    TROLLEY_REF_X:
+      description:
+        short: Trolley reference longitudinal offset
+        long: |-
+          Forward distance from the rear axle to the PX4 position reference point on the trolley centerline.
+
+          Set this if the IMU/GPS/UAV reference is not above the rear axle. Left/right wheel radius differences are not configured here because the reference point is assumed to be centered laterally.
+      type: float
+      default: 0.0
+      unit: m
+      min: -5.0
+      max: 20.0
+      decimal: 3
+      increment: 0.01
+    TROLLEY_STR_MAX:
+      description:
+        short: Trolley maximum wheel steering angle
+        long: |-
+          Maximum physical steering angle of the trolley wheels. The path steering command is normalized by this value and constrained to [-1, 1].
+
+          This is the wheel angle, not the servo horn angle. Use output min/center/max calibration for each servo to avoid overdriving the mechanical stops.
+      type: float
+      default: 20.0
+      unit: deg
+      min: 1.0
+      max: 45.0
+      decimal: 1
+      increment: 0.5
+    TROLLEY_TRK_GAIN:
+      description:
+        short: Trolley path tracking steering gain
+        long: |-
+          Converts closed-loop path tracking course error into a normalized trolley steering command.
+
+          Start with a low value and increase carefully during low-speed tests. This only applies when TROLLEY_STR_MODE is set to closed-loop path tracking.
+      type: float
+      default: 1.0
+      min: 0.0
+      max: 5.0
+      decimal: 2
+      increment: 0.1
+    TROLLEY_STR_RATE:
+      description:
+        short: Trolley steering command slew rate
+        long: Limits how quickly the direct trolley steering command can change. Set to -1 to disable.
+      type: float
+      default: 1.0
+      min: -1.0
+      max: 20.0
+      decimal: 2
+      increment: 0.1
+    TROLLEY_STR_HOLD:
+      description:
+        short: Trolley straight steering hold time
+        long: |-
+          Time to keep commanding neutral wheel steering after trolley takeoff enters climbout.
+
+          This gives the trolley steering servos time to return to straight before the physical connector separates.
+      type: float
+      default: 0.5
+      unit: s
+      min: 0.0
+      max: 5.0
+      decimal: 2
+      increment: 0.1
+    TROLLEY_CONN_EN:
+      description:
+        short: Enable trolley connection monitoring
+        long: |-
+          Enables monitoring of the physical trolley connection. When disabled, the trolley is assumed to be connected.
+      type: boolean
+      default: 0
+    TROLLEY_CONN_INV:
+      description:
+        short: Invert trolley connection signal
+        long: |-
+          Inverts the raw connection signal before it is interpreted. Enable this for a pull-up continuity loop where connected reads low and disconnected reads high.
+      type: boolean
+      default: 0
+    TROLLEY_CONN_DB:
+      description:
+        short: Trolley connection debounce time
+        long: |-
+          Time the connection signal must stay changed before it is accepted. This avoids aborting takeoff from pogo-pin bounce.
+      type: float
+      default: 0.05
+      unit: s
+      min: 0.0
+      max: 1.0
+      decimal: 2
+      increment: 0.01

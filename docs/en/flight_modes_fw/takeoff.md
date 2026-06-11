@@ -4,7 +4,7 @@
 
 The _Takeoff_ flight mode causes the vehicle to take off to a specified height and then enter [Hold mode](../flight_modes_fw/takeoff.md).
 
-Vehicles are [hand or catapult launched](#catapult-hand-launch) by default, but can also be [configured](#RWTO_TKOFF) to use a [runway takeoff](#runway-takeoff) when supported by the hardware.
+Vehicles use the default fixed-wing takeoff behavior unless [FW_TKOFF_METHOD](../advanced_config/parameter_reference.md#FW_TKOFF_METHOD) selects an assisted takeoff method such as [catapult/hand launch](#catapult-hand-launch), [runway takeoff](#runway-takeoff), or trolley takeoff.
 
 ::: info
 
@@ -23,8 +23,8 @@ Vehicles are [hand or catapult launched](#catapult-hand-launch) by default, but 
 
 ## Technical Summary
 
-Takeoff mode (and [fixed wing mission takeoff](../flight_modes_fw/mission.md#mission-takeoff)) has two modalities: [catapult/hand-launch](#catapult-hand-launch) or [runway takeoff](#runway-takeoff) (hardware-dependent).
-The mode defaults to catapult/hand launch, but can be set to runway takeoff by setting [RWTO_TKOFF](#RWTO_TKOFF) to 1.
+Takeoff mode (and [fixed wing mission takeoff](../flight_modes_fw/mission.md#mission-takeoff)) selects its takeoff behavior with [FW_TKOFF_METHOD](../advanced_config/parameter_reference.md#FW_TKOFF_METHOD).
+The supported methods are disabled/default behavior, [runway takeoff](#runway-takeoff), [catapult/hand-launch](#catapult-hand-launch), and trolley takeoff.
 
 To use _Takeoff mode_ you first switch to the mode, and then arm the vehicle (or send the [MAV_CMD_NAV_TAKEOFF](https://mavlink.io/en/messages/common.html#MAV_CMD_NAV_TAKEOFF) command which does both).
 The acceleration of hand/catapult launch triggers the motors to start.
@@ -62,6 +62,7 @@ Parameters that affect both catapult/hand-launch and runway takeoffs:
 | Parameter                                                         | Description                                                                                                                                              |
 | ----------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | <a id="MIS_TAKEOFF_ALT"></a>[MIS_TAKEOFF_ALT][MIS_TAKEOFF_ALT]    | This is the relative altitude (above launch altitude) the system will take off to if not otherwise specified. takeoff.                                   |
+| <a id="FW_TKOFF_METHOD"></a>[FW_TKOFF_METHOD][FW_TKOFF_METHOD]    | Selects the fixed-wing takeoff method.                                                                                                                   |
 | <a id="FW_TKO_AIRSPD"></a>[FW_TKO_AIRSPD][FW_TKO_AIRSPD]          | Takeoff airspeed (is set to [FW_AIRSPD_MIN][FW_AIRSPD_MIN] if not defined by operator)                                                                   |
 | <a id="FW_TKO_PITCH_MIN"></a>[FW_TKO_PITCH_MIN][FW_TKO_PITCH_MIN] | This is the minimum pitch angle setpoint during the climbout phase                                                                                       |
 | <a id="FW_T_CLMB_MAX"></a>[FW_T_CLMB_MAX][FW_T_CLMB_MAX]          | Climb rate setpoint during climbout to takeoff altitude.                                                                                                 |
@@ -72,6 +73,7 @@ Parameters that affect both catapult/hand-launch and runway takeoffs:
 [FW_FLAPS_TO_SCL]: ../advanced_config/parameter_reference.md#FW_FLAPS_TO_SCL
 [FW_AIRSPD_FLP_SC]: ../advanced_config/parameter_reference.md#FW_AIRSPD_FLP_SC
 [FW_TKO_AIRSPD]: ../advanced_config/parameter_reference.md#FW_TKO_AIRSPD
+[FW_TKOFF_METHOD]: ../advanced_config/parameter_reference.md#FW_TKOFF_METHOD
 [MIS_TAKEOFF_ALT]: ../advanced_config/parameter_reference.md#MIS_TAKEOFF_ALT
 [FW_TKO_PITCH_MIN]: ../advanced_config/parameter_reference.md#FW_TKO_PITCH_MIN
 [FW_T_CLMB_MAX]: ../advanced_config/parameter_reference.md#FW_T_CLMB_MAX
@@ -83,6 +85,7 @@ The vehicle always respects normal FW max/min throttle settings during takeoff (
 ## Catapult/Hand Launch {#hand_launch}
 
 In _catapult/hand-launch mode_ the vehicle waits to detect launch (based on acceleration trigger).
+Select this mode by setting [FW_TKOFF_METHOD](../advanced_config/parameter_reference.md#FW_TKOFF_METHOD) to `Launch detection`.
 On launch it enables the motor(s) and climbs with the maximum climb rate [FW_T_CLMB_MAX](#FW_T_CLMB_MAX) while keeping the pitch setpoint above [FW_TKO_PITCH_MIN](#FW_TKO_PITCH_MIN).
 Once it reaches [MIS_TAKEOFF_ALT](#MIS_TAKEOFF_ALT) it will automatically switch to [Hold mode](../flight_modes_fw/hold.md) and loiter.
 It is possible to delay the activation of the motors and control surfaces separately, see parameters [FW_LAUN_MOT_DEL](#FW_LAUN_MOT_DEL), [FW_LAUN_CS_LK_DY](#FW_LAUN_CS_LK_DY) and [CA_CS_LAUN_LK](#CA_CS_LAUN_LK). The later is also exposed in the actuator configuration page under the advanced view.
@@ -102,7 +105,7 @@ The _launch detector_ is affected by the following parameters:
 
 | Parameter                                                                                                   | Description                                                                     |
 | ----------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
-| <a id="FW_LAUN_DETCN_ON"></a>[FW_LAUN_DETCN_ON](../advanced_config/parameter_reference.md#FW_LAUN_DETCN_ON) | Enable automatic launch detection. If disabled motors spin up on arming already |
+| <a id="FW_TKOFF_METHOD_LAUNCH"></a>[FW_TKOFF_METHOD](../advanced_config/parameter_reference.md#FW_TKOFF_METHOD) | Set to `Launch detection` for hand or catapult launch.                          |
 | <a id="FW_LAUN_AC_THLD"></a>[FW_LAUN_AC_THLD](../advanced_config/parameter_reference.md#FW_LAUN_AC_THLD)    | Acceleration threshold (norm of acceleration must be above this value)          |
 | <a id="FW_LAUN_AC_T"></a>[FW_LAUN_AC_T](../advanced_config/parameter_reference.md#FW_LAUN_AC_T)             | Trigger time (acceleration must be above threshold for this amount of seconds)  |
 | <a id="FW_LAUN_MOT_DEL"></a>[FW_LAUN_MOT_DEL](../advanced_config/parameter_reference.md#FW_LAUN_MOT_DEL)    | Delay from launch detection to motor spin up                                    |
@@ -112,6 +115,7 @@ The _launch detector_ is affected by the following parameters:
 ## Runway Takeoff {#runway_launch}
 
 Runway takeoffs can be used by vehicles with landing gear and steerable wheel (only).
+Select this mode by setting [FW_TKOFF_METHOD](../advanced_config/parameter_reference.md#FW_TKOFF_METHOD) to `Runway`.
 You will first need to enable the wheel controller using the parameter [FW_W_EN](#FW_W_EN).
 
 Vehicle should be centered and aligned with runway when takeoff is initiated.
@@ -134,7 +138,7 @@ Runway takeoff is affected by the following parameters:
 
 | Parameter                                                                                                | Description                                                                                                                  |
 | -------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
-| <a id="RWTO_TKOFF"></a>[RWTO_TKOFF](../advanced_config/parameter_reference.md#RWTO_TKOFF)                | Enable runway takeoff                                                                                                        |
+| <a id="FW_TKOFF_METHOD_RUNWAY"></a>[FW_TKOFF_METHOD](../advanced_config/parameter_reference.md#FW_TKOFF_METHOD) | Set to `Runway` for runway takeoff                                                                                           |
 | <a id="FW_W_EN"></a>[FW_W_EN](../advanced_config/parameter_reference.md#FW_W_EN)                         | Enable wheel controller                                                                                                      |
 | <a id="RWTO_MAX_THR"></a>[RWTO_MAX_THR](../advanced_config/parameter_reference.md#RWTO_MAX_THR)          | Max throttle during runway takeoff                                                                                           |
 | <a id="RWTO_RAMP_TIME"></a>[RWTO_RAMP_TIME](../advanced_config/parameter_reference.md#RWTO_RAMP_TIME)    | Throttle ramp up time                                                                                                        |

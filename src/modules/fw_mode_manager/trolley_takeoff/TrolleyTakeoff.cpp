@@ -1,0 +1,496 @@
+/****************************************************************************
+ *
+ *   Copyright (c) 2026 PX4 Development Team. All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions
+ * are met:
+ *
+ * 1. Redistributions of source code must retain the above copyright
+ *    notice, this list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright
+ *    notice, this list of conditions and the following disclaimer in
+ *    the documentation and/or other materials provided with the
+ *    distribution.
+ * 3. Neither the name PX4 nor the names of its contributors may be
+ *    used to endorse or promote products derived from this software
+ *    without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+ * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+ * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
+ * FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
+ * COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
+ * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
+ * BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS
+ * OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED
+ * AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN
+ * ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ * POSSIBILITY OF SUCH DAMAGE.
+ *
+ ****************************************************************************/
+/**
+ * @file TrolleyTakeoff.cpp
+ * Trolley-assisted takeoff handling for fixed-wing UAVs.
+ */
+
+#include "TrolleyTakeoff.h"
+
+#include <float.h>
+#include <math.h>
+
+#include <mathlib/mathlib.h>
+#include <px4_platform_common/events.h>
+
+using namespace time_literals;
+
+namespace trolleytakeoff
+{
+
+	void TrolleyTakeoff::init(const hrt_abstime &time_now)
+	{
+		takeoff_state_ = TrolleyTakeoffState::THROTTLE_RAMP;
+		initialized_ = true;
+		time_initialized_ = time_now;
+		takeoff_time_ = 0;
+		time_connection_signal_changed_ = time_now;
+		time_last_steering_update_ = time_now;
+		trolley_connected_ = true;
+		raw_trolley_connected_ = true;
+		release_authorized_ = false;
+		bad_disconnect_detected_ = false;
+		good_disconnect_detected_ = false;
+		wheel_steering_setpoint_ = 0.f;
+	}
+
+	void TrolleyTakeoff::update(const hrt_abstime &time_now, const float takeoff_airspeed, const float calibrated_airspeed,
+				    const float estimated_ground_speed, const float vehicle_altitude, const float clearance_altitude,
+				    const bool trolley_connection_signal)
+	{
+		updateConnectionState(time_now, trolley_connection_signal);
+
+		if (connectionSensorEnabled() && !trolley_connected_)
+		{
+			if (!release_authorized_ && !bad_disconnect_detected_)
+			{
+				takeoff_state_ = TrolleyTakeoffState::ABORTED;
+				wheel_steering_setpoint_ = 0.f;
+				bad_disconnect_detected_ = true;
+				events::send(events::ID("trolley_takeoff_bad_disconnect"), events::Log::Critical,
+					     "Trolley disconnected before release, aborting takeoff");
+			}
+
+			if (release_authorized_ && !good_disconnect_detected_)
+			{
+				good_disconnect_detected_ = true;
+				events::send(events::ID("trolley_takeoff_released"), events::Log::Info,
+					     "Trolley disconnected after release");
+			}
+		}
+
+		if (takeoff_state_ == TrolleyTakeoffState::ABORTED)
+		{
+			return;
+		}
+
+		switch (takeoff_state_)
+		{
+			case TrolleyTakeoffState::THROTTLE_RAMP:
+				if ((time_now - time_initialized_) > (param_trolley_ramp_time_.get() * 1_s))
+				{
+					takeoff_state_ = TrolleyTakeoffState::CLAMPED_TO_TROLLEY;
+				}
+
+				break;
+
+			case TrolleyTakeoffState::CLAMPED_TO_TROLLEY:
+				if (releaseConditionReached(time_now, takeoff_airspeed, calibrated_airspeed, estimated_ground_speed))
+				{
+					takeoff_time_ = time_now;
+					takeoff_state_ = TrolleyTakeoffState::CLIMBOUT;
+					release_authorized_ = true;
+					wheel_steering_setpoint_ = 0.f;
+					events::send(events::ID("trolley_takeoff_release"), events::Log::Info,
+						     "Trolley takeoff release condition reached, climbout");
+				}
+
+				break;
+
+			case TrolleyTakeoffState::CLIMBOUT:
+				if (vehicle_altitude > clearance_altitude)
+				{
+					takeoff_state_ = TrolleyTakeoffState::FLYING;
+					events::send(events::ID("trolley_takeoff_reached_clearance_altitude"), events::Log::Info,
+						     "Trolley takeoff reached clearance altitude");
+				}
+
+				break;
+
+			default:
+				break;
+		}
+	}
+
+	bool TrolleyTakeoff::wheelSteeringEnabled() const
+	{
+		if (isAborted())
+		{
+			return false;
+		}
+
+		if (takeoff_state_ < TrolleyTakeoffState::CLIMBOUT)
+		{
+			return true;
+		}
+
+		return takeoff_state_ == TrolleyTakeoffState::CLIMBOUT
+		       && takeoff_time_ != 0
+		       && hrt_elapsed_time(&takeoff_time_) < (param_trolley_str_hold_.get() * 1_s);
+	}
+
+	bool TrolleyTakeoff::directWheelSteeringEnabled() const
+	{
+		if (!wheelSteeringEnabled())
+		{
+			return false;
+		}
+
+		if (takeoff_state_ >= TrolleyTakeoffState::CLIMBOUT)
+		{
+			return true;
+		}
+
+		return pathTrackingSteeringEnabled() || openLoopSteeringEnabled();
+	}
+
+	bool TrolleyTakeoff::headingSteeringEnabled() const
+	{
+		return takeoff_state_ < TrolleyTakeoffState::CLIMBOUT
+		       && param_trolley_str_mode_.get() == TrolleySteeringMode::STEERING_HEADING;
+	}
+
+	bool TrolleyTakeoff::pathTrackingSteeringEnabled() const
+	{
+		return takeoff_state_ < TrolleyTakeoffState::CLIMBOUT
+		       && param_trolley_str_mode_.get() == TrolleySteeringMode::STEERING_PATH_TRACKING;
+	}
+
+	bool TrolleyTakeoff::openLoopSteeringEnabled() const
+	{
+		return takeoff_state_ < TrolleyTakeoffState::CLIMBOUT
+		       && param_trolley_str_mode_.get() == TrolleySteeringMode::STEERING_OPEN_LOOP;
+	}
+
+	float TrolleyTakeoff::minimumTurnRadius() const
+	{
+		const float wheelbase = param_trolley_wheelbase_.get();
+		const float max_steering_angle = math::radians(param_trolley_str_max_.get());
+		const float reference_x = param_trolley_ref_x_.get();
+
+		if (wheelbase <= FLT_EPSILON || max_steering_angle <= FLT_EPSILON)
+		{
+			return NAN;
+		}
+
+		const float max_steering_tangent = tanf(max_steering_angle);
+
+		if (max_steering_tangent <= FLT_EPSILON)
+		{
+			return NAN;
+		}
+
+		const float rear_axle_min_radius = wheelbase / max_steering_tangent;
+
+		return sqrtf(rear_axle_min_radius * rear_axle_min_radius + reference_x * reference_x);
+	}
+
+	float TrolleyTakeoff::effectivePathRadius() const
+	{
+		const float requested_reference_radius = param_trolley_radius_.get();
+		const float min_reference_radius = minimumTurnRadius();
+
+		if (!PX4_ISFINITE(min_reference_radius))
+		{
+			return requested_reference_radius;
+		}
+
+		return math::max(requested_reference_radius, min_reference_radius);
+	}
+
+	float TrolleyTakeoff::rearAxleTurnRadius(const float reference_radius) const
+	{
+		const float reference_x = param_trolley_ref_x_.get();
+
+		if (!PX4_ISFINITE(reference_radius) || reference_radius <= FLT_EPSILON)
+		{
+			return NAN;
+		}
+
+		if (fabsf(reference_x) <= FLT_EPSILON)
+		{
+			return reference_radius;
+		}
+
+		// Track width is intentionally not used here: steering uses a centerline bicycle model, not inner-wheel radius.
+		const float rear_axle_radius_squared = reference_radius * reference_radius - reference_x * reference_x;
+
+		return rear_axle_radius_squared > FLT_EPSILON ? sqrtf(rear_axle_radius_squared) : NAN;
+	}
+
+	void TrolleyTakeoff::updateWheelSteeringSetpoint(const hrt_abstime &time_now, const float target_setpoint)
+	{
+		float steering_setpoint = PX4_ISFINITE(target_setpoint) ? math::constrain(target_setpoint, -1.f, 1.f) : 0.f;
+
+		if (isAborted() || takeoff_state_ >= TrolleyTakeoffState::CLIMBOUT)
+		{
+			steering_setpoint = 0.f;
+		}
+
+		if (time_last_steering_update_ == 0)
+		{
+			wheel_steering_setpoint_ = steering_setpoint;
+			time_last_steering_update_ = time_now;
+			return;
+		}
+
+		const float slew_rate = param_trolley_str_rate_.get();
+
+		if (slew_rate < 0.f)
+		{
+			wheel_steering_setpoint_ = steering_setpoint;
+
+		}
+
+		else
+		{
+			const float dt = math::max((time_now - time_last_steering_update_) * 1.e-6f, 0.f);
+			const float max_delta = slew_rate * dt;
+			const float delta = math::constrain(steering_setpoint - wheel_steering_setpoint_, -max_delta, max_delta);
+			wheel_steering_setpoint_ += delta;
+		}
+
+		time_last_steering_update_ = time_now;
+	}
+
+	float TrolleyTakeoff::openLoopWheelSteeringSetpoint() const
+	{
+		if (isAborted() || takeoff_state_ >= TrolleyTakeoffState::CLIMBOUT)
+		{
+			return 0.f;
+		}
+
+		const int32_t path_type = param_trolley_path_.get();
+
+		if (path_type == TrolleyPathType::PATH_STRAIGHT)
+		{
+			return 0.f;
+		}
+
+		if (path_type != TrolleyPathType::PATH_CONSTANT_RIGHT && path_type != TrolleyPathType::PATH_CONSTANT_LEFT)
+		{
+			return 0.f;
+		}
+
+		const float wheelbase = param_trolley_wheelbase_.get();
+		const float rear_axle_radius = rearAxleTurnRadius(effectivePathRadius());
+		const float max_steering_angle = math::radians(param_trolley_str_max_.get());
+
+		if (wheelbase <= FLT_EPSILON || rear_axle_radius <= FLT_EPSILON || max_steering_angle <= FLT_EPSILON)
+		{
+			return 0.f;
+		}
+
+		const float steering_angle = atanf(wheelbase / rear_axle_radius);
+		const float direction = (path_type == TrolleyPathType::PATH_CONSTANT_RIGHT) ? 1.f : -1.f;
+
+		return math::constrain(direction * steering_angle / max_steering_angle, -1.f, 1.f);
+	}
+
+	float TrolleyTakeoff::pathTrackingWheelSteeringSetpoint(const float course_setpoint, const float yaw) const
+	{
+		const float max_steering_angle = math::radians(param_trolley_str_max_.get());
+
+		if (!PX4_ISFINITE(course_setpoint) || !PX4_ISFINITE(yaw) || max_steering_angle <= FLT_EPSILON)
+		{
+			return 0.f;
+		}
+
+		const float course_error = matrix::wrap_pi(course_setpoint - yaw);
+		const float steering_angle = param_trolley_trk_gain_.get() * course_error;
+
+		return math::constrain(steering_angle / max_steering_angle, -1.f, 1.f);
+	}
+
+	float TrolleyTakeoff::rotationAirspeedThreshold(const float takeoff_airspeed) const
+	{
+		return (param_trolley_rot_airspd_.get() > FLT_EPSILON) ?
+		       math::min(param_trolley_rot_airspd_.get(), takeoff_airspeed) :
+		       0.9f * takeoff_airspeed;
+	}
+
+	float TrolleyTakeoff::rotationGroundspeedThreshold(const float takeoff_airspeed) const
+	{
+		return (param_trolley_rot_gspd_.get() > FLT_EPSILON) ?
+		       param_trolley_rot_gspd_.get() :
+		       rotationAirspeedThreshold(takeoff_airspeed);
+	}
+
+	bool TrolleyTakeoff::releaseConditionReached(const hrt_abstime &time_now, const float takeoff_airspeed,
+			const float calibrated_airspeed, const float estimated_ground_speed) const
+	{
+		switch (param_trolley_tk_cond_.get())
+		{
+			case TrolleyTakeoffCondition::CONDITION_GROUNDSPEED:
+				return PX4_ISFINITE(estimated_ground_speed)
+				       && estimated_ground_speed > rotationGroundspeedThreshold(takeoff_airspeed);
+
+			case TrolleyTakeoffCondition::CONDITION_TIME:
+				return (time_now - time_initialized_) > (math::max(param_trolley_tk_time_.get(), 0.f) * 1_s);
+
+			case TrolleyTakeoffCondition::CONDITION_AIRSPEED:
+			default:
+				return PX4_ISFINITE(calibrated_airspeed) && calibrated_airspeed > rotationAirspeedThreshold(takeoff_airspeed);
+		}
+	}
+
+	void TrolleyTakeoff::updateConnectionState(const hrt_abstime &time_now, const bool trolley_connection_signal)
+	{
+		if (!connectionSensorEnabled())
+		{
+			trolley_connected_ = true;
+			raw_trolley_connected_ = true;
+			time_connection_signal_changed_ = time_now;
+			return;
+		}
+
+		const bool connected = param_trolley_conn_inv_.get() ? !trolley_connection_signal : trolley_connection_signal;
+
+		if (connected != raw_trolley_connected_)
+		{
+			raw_trolley_connected_ = connected;
+			time_connection_signal_changed_ = time_now;
+		}
+
+		if ((time_now - time_connection_signal_changed_) > (param_trolley_conn_debounce_.get() * 1_s))
+		{
+			trolley_connected_ = raw_trolley_connected_;
+		}
+	}
+
+	float TrolleyTakeoff::getPitch() const
+	{
+		if (takeoff_state_ <= TrolleyTakeoffState::CLAMPED_TO_TROLLEY)
+		{
+			return math::radians(param_trolley_psp_.get());
+		}
+
+		return NAN;
+	}
+
+	float TrolleyTakeoff::getRoll() const
+	{
+		if (takeoff_state_ < TrolleyTakeoffState::CLIMBOUT)
+		{
+			return 0.0f;
+		}
+
+		return NAN;
+	}
+
+	float TrolleyTakeoff::getThrottle(const float idle_throttle) const
+	{
+		float throttle = idle_throttle;
+
+		switch (takeoff_state_)
+		{
+			case TrolleyTakeoffState::THROTTLE_RAMP:
+				throttle = interpolateValuesOverAbsoluteTime(idle_throttle, param_trolley_max_thr_.get(), time_initialized_,
+						param_trolley_ramp_time_.get());
+				break;
+
+			case TrolleyTakeoffState::CLAMPED_TO_TROLLEY:
+			case TrolleyTakeoffState::CLIMBOUT:
+				throttle = param_trolley_max_thr_.get();
+				break;
+
+			case TrolleyTakeoffState::FLYING:
+				throttle = NAN;
+				break;
+
+			case TrolleyTakeoffState::ABORTED:
+				throttle = idle_throttle;
+				break;
+		}
+
+		return throttle;
+	}
+
+	float TrolleyTakeoff::getMinPitch(float min_pitch_in_climbout, float min_pitch) const
+	{
+		if (takeoff_state_ < TrolleyTakeoffState::CLIMBOUT)
+		{
+			return math::radians(param_trolley_psp_.get() - 0.01f);
+
+		}
+
+		else if (takeoff_state_ < TrolleyTakeoffState::FLYING)
+		{
+			const float trolley_pitch_min = math::radians(param_trolley_psp_.get() - 0.01f);
+			return interpolateValuesOverAbsoluteTime(trolley_pitch_min, min_pitch_in_climbout, takeoff_time_,
+					param_trolley_rot_time_.get());
+
+		}
+
+		else
+		{
+			return min_pitch;
+		}
+	}
+
+	float TrolleyTakeoff::getMaxPitch(const float max_pitch) const
+	{
+		if (takeoff_state_ < TrolleyTakeoffState::CLIMBOUT)
+		{
+			return math::radians(param_trolley_psp_.get() + 0.01f);
+
+		}
+
+		else if (takeoff_state_ < TrolleyTakeoffState::FLYING)
+		{
+			const float trolley_pitch_max = math::radians(param_trolley_psp_.get() + 0.01f);
+			return interpolateValuesOverAbsoluteTime(trolley_pitch_max, max_pitch, takeoff_time_, param_trolley_rot_time_.get());
+
+		}
+
+		else
+		{
+			return max_pitch;
+		}
+	}
+
+	void TrolleyTakeoff::reset()
+	{
+		initialized_ = false;
+		takeoff_state_ = TrolleyTakeoffState::THROTTLE_RAMP;
+		takeoff_time_ = 0;
+		time_connection_signal_changed_ = 0;
+		time_last_steering_update_ = 0;
+		trolley_connected_ = true;
+		raw_trolley_connected_ = true;
+		release_authorized_ = false;
+		bad_disconnect_detected_ = false;
+		good_disconnect_detected_ = false;
+		wheel_steering_setpoint_ = 0.f;
+	}
+
+	float TrolleyTakeoff::interpolateValuesOverAbsoluteTime(const float start_value, const float end_value,
+			const hrt_abstime &start_time, const float interpolation_time) const
+	{
+		const float seconds_since_start = hrt_elapsed_time(&start_time) * 1.e-6f;
+		const float interpolator = math::constrain(seconds_since_start / interpolation_time, 0.0f, 1.0f);
+
+		return interpolator * end_value + (1.0f - interpolator) * start_value;
+	}
+
+} // namespace trolleytakeoff

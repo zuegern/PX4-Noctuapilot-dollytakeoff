@@ -4,7 +4,7 @@
 
 The _Takeoff_ flight mode causes the vehicle to take off to a specified height and then enter [Hold mode](../flight_modes_fw/takeoff.md).
 
-Vehicles are [hand or catapult launched](#catapult-hand-launch) by default, but can also be [configured](#RWTO_TKOFF) to use a [runway takeoff](#runway-takeoff) when supported by the hardware.
+Vehicles are [hand or catapult launched](#catapult-hand-launch) by default, but can also be [configured](#FW_TKOFF_METHOD) to use a [runway takeoff](#runway-takeoff) when supported by the hardware.
 
 ::: info
 
@@ -24,7 +24,7 @@ Vehicles are [hand or catapult launched](#catapult-hand-launch) by default, but 
 ## Технічний підсумок
 
 Takeoff mode (and [fixed wing mission takeoff](../flight_modes_fw/mission.md#mission-takeoff)) has two modalities: [catapult/hand-launch](#catapult-hand-launch) or [runway takeoff](#runway-takeoff) (hardware-dependent).
-The mode defaults to catapult/hand launch, but can be set to runway takeoff by setting [RWTO_TKOFF](#RWTO_TKOFF) to 1.
+The mode defaults to catapult/hand launch, but can be set to runway takeoff by setting [FW_TKOFF_METHOD](#FW_TKOFF_METHOD) to 1.
 
 To use _Takeoff mode_ you first switch to the mode, and then arm the vehicle (or send the [MAV_CMD_NAV_TAKEOFF](https://mavlink.io/en/messages/common.html#MAV_CMD_NAV_TAKEOFF) command which does both).
 Прискорення запуску з руки/катапульти спричиняє запуск двигунів.
@@ -102,7 +102,7 @@ The _launch detector_ is affected by the following parameters:
 
 | Параметр                                                                                                                                                                                        | Опис                                                                                                                  |
 | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
-| <a id="FW_LAUN_DETCN_ON"></a>[FW_LAUN_DETCN_ON](../advanced_config/parameter_reference.md#FW_LAUN_DETCN_ON)                      | Увімкнути автоматичне визначення запуску. Якщо вимкнені двигуни обертаються при підготовці до польоту |
+| <a id="FW_TKOFF_METHOD_LAUNCH"></a>[FW_TKOFF_METHOD](../advanced_config/parameter_reference.md#FW_TKOFF_METHOD) | Set to `Launch detection` for hand or catapult launch. |
 | <a id="FW_LAUN_AC_THLD"></a>[FW_LAUN_AC_THLD](../advanced_config/parameter_reference.md#FW_LAUN_AC_THLD)                         | Acceleration threshold (norm of acceleration must be above this value)                             |
 | <a id="FW_LAUN_AC_T"></a>[FW_LAUN_AC_T](../advanced_config/parameter_reference.md#FW_LAUN_AC_T)                                  | Час спрацьовування (прискорення повинно бути вище порогу на цю кількість секунд)                   |
 | <a id="FW_LAUN_MOT_DEL"></a>[FW_LAUN_MOT_DEL](../advanced_config/parameter_reference.md#FW_LAUN_MOT_DEL)                         | Затримка від виявлення запуску до відкручування мотору                                                                |
@@ -134,7 +134,7 @@ It consists of a rate controller (P-I-FF-controller with the parameters [FW_WR_P
 
 | Параметр                                                                                                                                           | Опис                                                                                                                                                                                                                                |
 | -------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| <a id="RWTO_TKOFF"></a>[RWTO_TKOFF](../advanced_config/parameter_reference.md#RWTO_TKOFF)                                     | Увімкніть зліт по взлітній смузі                                                                                                                                                                                                    |
+| <a id="FW_TKOFF_METHOD_RUNWAY"></a>[FW_TKOFF_METHOD](../advanced_config/parameter_reference.md#FW_TKOFF_METHOD) | Set to `Runway` for runway takeoff. |
 | <a id="FW_W_EN"></a>[FW_W_EN](../advanced_config/parameter_reference.md#FW_W_EN)                         | Увімкнути контролер колеса                                                                                                                                                                                                          |
 | <a id="RWTO_MAX_THR"></a>[RWTO_MAX_THR](../advanced_config/parameter_reference.md#RWTO_MAX_THR)          | Максимальне розгін під час взліту зі злітної смуги                                                                                                                                                                                  |
 | <a id="RWTO_RAMP_TIME"></a>[RWTO_RAMP_TIME](../advanced_config/parameter_reference.md#RWTO_RAMP_TIME)    | Час прискорення ручки газу                                                                                                                                                                                                          |

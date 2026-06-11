@@ -2,11 +2,6 @@ module_name: runway_takeoff
 parameters:
 - group: Runway Takeoff
   definitions:
-    RWTO_TKOFF:
-      description:
-        short: Runway takeoff with landing gear
-      type: boolean
-      default: 0
     RWTO_MAX_THR:
       description:
         short: Throttle during runway takeoff

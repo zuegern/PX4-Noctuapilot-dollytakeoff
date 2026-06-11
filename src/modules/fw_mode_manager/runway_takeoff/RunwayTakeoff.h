@@ -96,11 +96,6 @@ public:
 	bool isInitialized() { return initialized_; }
 
 	/**
-	 * @return Runway takeoff is enabled
-	 */
-	bool runwayTakeoffEnabled() { return param_rwto_tkoff_.get(); }
-
-	/**
 	 * @return Pitch angle setpoint (limited while plane is on runway) [rad]
 	 */
 	float getPitch();
@@ -176,7 +171,6 @@ private:
 	hrt_abstime takeoff_time_{0};
 
 	DEFINE_PARAMETERS(
-		(ParamBool<px4::params::RWTO_TKOFF>) param_rwto_tkoff_,
 		(ParamFloat<px4::params::RWTO_MAX_THR>) param_rwto_max_thr_,
 		(ParamFloat<px4::params::RWTO_PSP>) param_rwto_psp_,
 		(ParamFloat<px4::params::RWTO_RAMP_TIME>) param_rwto_ramp_time_,

@@ -89,7 +89,7 @@ In order to proceed to the next state, each condition has to be true for 300ms.
 - [LNDFW_TRIG_TIME](../advanced_config/parameter_reference.md#LNDFW_TRIG_TIME) - Час спрацювання, протягом якого вищезазначені умови повинні бути виконані для оголошення посадки.
 
 :::info
-Коли виявлення запуску FW увімкнено ([FW_LAUN_DETCN_ON](../advanced_config/parameter_reference.md#FW_LAUN_DETCN_ON)), транспортний засіб залишиться в стані "приземлено" до виявлення зльоту (що базується виключно на прискоренні, а не на швидкості).
+When the fixed-wing takeoff method ([FW_TKOFF_METHOD](../advanced_config/parameter_reference.md#FW_TKOFF_METHOD)) is set to launch detection, the vehicle will stay in "landed" state until takeoff is detected (which is purely based on acceleration and not velocity).
 :::
 
 ## VTOL детектор землі

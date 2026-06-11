@@ -43,6 +43,42 @@
 
 param_modify_on_import_ret param_modify_on_import(bson_node_t node)
 {
+	// 2026-06-10: translate fixed-wing takeoff mode booleans to FW_TKOFF_METHOD
+	{
+		if (strcmp("RWTO_TKOFF", node->name) == 0) {
+			if (node->i32 != 0) {
+				node->i32 = 1;
+				strcpy(node->name, "FW_TKOFF_METHOD");
+				PX4_INFO("migrating %s -> %s", "RWTO_TKOFF", "FW_TKOFF_METHOD");
+				return param_modify_on_import_ret::PARAM_MODIFIED;
+			}
+
+			return param_modify_on_import_ret::PARAM_SKIP_IMPORT;
+		}
+
+		if (strcmp("FW_LAUN_DETCN_ON", node->name) == 0) {
+			if (node->i32 != 0) {
+				node->i32 = 2;
+				strcpy(node->name, "FW_TKOFF_METHOD");
+				PX4_INFO("migrating %s -> %s", "FW_LAUN_DETCN_ON", "FW_TKOFF_METHOD");
+				return param_modify_on_import_ret::PARAM_MODIFIED;
+			}
+
+			return param_modify_on_import_ret::PARAM_SKIP_IMPORT;
+		}
+
+		if (strcmp("TROLLEY_TKOFF", node->name) == 0) {
+			if (node->i32 != 0) {
+				node->i32 = 3;
+				strcpy(node->name, "FW_TKOFF_METHOD");
+				PX4_INFO("migrating %s -> %s", "TROLLEY_TKOFF", "FW_TKOFF_METHOD");
+				return param_modify_on_import_ret::PARAM_MODIFIED;
+			}
+
+			return param_modify_on_import_ret::PARAM_SKIP_IMPORT;
+		}
+	}
+
 	// 2023-12-06: translate and invert FW_ARSP_MODE-> FW_USE_AIRSPD
 	{
 		if (strcmp("FW_ARSP_MODE", node->name) == 0) {

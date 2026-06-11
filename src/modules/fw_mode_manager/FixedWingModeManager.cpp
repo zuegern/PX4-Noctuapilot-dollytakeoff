@@ -57,7 +57,8 @@ FixedWingModeManager::FixedWingModeManager() :
 	WorkItem(MODULE_NAME, px4::wq_configurations::nav_and_controllers),
 	_loop_perf(perf_alloc(PC_ELAPSED, MODULE_NAME": cycle")),
 	_launchDetector(this),
-	_runway_takeoff(this)
+	_runway_takeoff(this),
+	_trolley_takeoff(this)
 #ifdef CONFIG_FIGURE_OF_EIGHT
 	, _figure_eight(_directional_guidance, _wind_vel)
 #endif // CONFIG_FIGURE_OF_EIGHT
@@ -79,6 +80,24 @@ FixedWingModeManager::FixedWingModeManager() :
 FixedWingModeManager::~FixedWingModeManager()
 {
 	perf_free(_loop_perf);
+}
+
+bool
+FixedWingModeManager::runwayTakeoffEnabled() const
+{
+	return _param_fw_tkoff_method.get() == TAKEOFF_METHOD_RUNWAY;
+}
+
+bool
+FixedWingModeManager::launchDetectionTakeoffEnabled() const
+{
+	return _param_fw_tkoff_method.get() == TAKEOFF_METHOD_LAUNCH_DETECTION;
+}
+
+bool
+FixedWingModeManager::trolleyTakeoffEnabled() const
+{
+	return _param_fw_tkoff_method.get() == TAKEOFF_METHOD_TROLLEY;
 }
 
 bool
@@ -1086,6 +1105,98 @@ FixedWingModeManager::control_auto_path(const float control_interval, const Vect
 	}
 }
 
+bool
+FixedWingModeManager::trolleyConnectionSignal() const
+{
+	// TODO: replace this with the pogo-pin GPIO input once the hardware circuit is built.
+	return true;
+}
+
+void
+FixedWingModeManager::publishTrolleyTakeoffAbortSetpoints(const hrt_abstime &now)
+{
+	fixed_wing_lateral_setpoint_s lateral_ctrl_sp{empty_lateral_control_setpoint};
+	lateral_ctrl_sp.timestamp = now;
+	lateral_ctrl_sp.lateral_acceleration = 0.f;
+	_lateral_ctrl_sp_pub.publish(lateral_ctrl_sp);
+
+	const fixed_wing_longitudinal_setpoint_s fw_longitudinal_control_sp = {
+		.timestamp = now,
+		.altitude = NAN,
+		.height_rate = NAN,
+		.equivalent_airspeed = NAN,
+		.pitch_direct = 0.f,
+		.throttle_direct = _param_fw_thr_idle.get()
+	};
+
+	_longitudinal_ctrl_sp_pub.publish(fw_longitudinal_control_sp);
+
+	_ctrl_configuration_handler.setPitchMin(NAN);
+	_ctrl_configuration_handler.setPitchMax(NAN);
+	_ctrl_configuration_handler.setThrottleMin(_param_fw_thr_idle.get());
+	_ctrl_configuration_handler.setThrottleMax(_param_fw_thr_idle.get());
+	_ctrl_configuration_handler.setDisableUnderspeedProtection(false);
+
+	fixed_wing_runway_control_s fw_runway_control{};
+	fw_runway_control.timestamp = now;
+	fw_runway_control.runway_takeoff_state = fixed_wing_runway_control_s::STATE_FLYING;
+	fw_runway_control.wheel_steering_enabled = false;
+	fw_runway_control.wheel_steering_nudging_rate = 0.f;
+	fw_runway_control.wheel_steering_direct = false;
+	fw_runway_control.wheel_steering_setpoint = 0.f;
+
+	_fixed_wing_runway_control_pub.publish(fw_runway_control);
+}
+
+DirectionalGuidanceOutput
+FixedWingModeManager::navigateTrolleyPath(const Vector2f &start_pos_local, const float takeoff_bearing,
+		const Vector2f &vehicle_pos, const Vector2f &ground_vel)
+{
+	if (!_trolley_takeoff.pathTrackingSteeringEnabled()) {
+		return navigateLine(start_pos_local, takeoff_bearing, vehicle_pos, ground_vel, _wind_vel);
+	}
+
+	const int32_t path_type = _trolley_takeoff.pathType();
+
+	if (path_type == trolleytakeoff::PATH_STRAIGHT) {
+		return navigateLine(start_pos_local, takeoff_bearing, vehicle_pos, ground_vel, _wind_vel);
+	}
+
+	if (path_type != trolleytakeoff::PATH_CONSTANT_RIGHT && path_type != trolleytakeoff::PATH_CONSTANT_LEFT) {
+		return navigateLine(start_pos_local, takeoff_bearing, vehicle_pos, ground_vel, _wind_vel);
+	}
+
+	const float reference_radius = _trolley_takeoff.effectivePathRadius();
+
+	if (reference_radius <= FLT_EPSILON) {
+		return navigateLine(start_pos_local, takeoff_bearing, vehicle_pos, ground_vel, _wind_vel);
+	}
+
+	const bool right_turn = path_type == trolleytakeoff::PATH_CONSTANT_RIGHT;
+	const Vector2f tangent_at_start{cosf(takeoff_bearing), sinf(takeoff_bearing)};
+	const Vector2f center_direction = right_turn ?
+					  Vector2f{-tangent_at_start(1), tangent_at_start(0)} :
+					  Vector2f{tangent_at_start(1), -tangent_at_start(0)};
+	const Vector2f turn_center = start_pos_local + center_direction * reference_radius;
+
+	Vector2f center_to_vehicle = vehicle_pos - turn_center;
+
+	if (center_to_vehicle.norm() <= FLT_EPSILON) {
+		center_to_vehicle = start_pos_local - turn_center;
+	}
+
+	if (center_to_vehicle.norm() <= FLT_EPSILON) {
+		return navigateLine(start_pos_local, takeoff_bearing, vehicle_pos, ground_vel, _wind_vel);
+	}
+
+	const Vector2f radial = center_to_vehicle.normalized();
+	const Vector2f position_setpoint = turn_center + radial * reference_radius;
+	const Vector2f tangent_setpoint = right_turn ? Vector2f{-radial(1), radial(0)} : Vector2f{radial(1), -radial(0)};
+	const float curvature = (right_turn ? 1.f : -1.f) / reference_radius;
+
+	return navigatePathTangent(vehicle_pos, position_setpoint, tangent_setpoint, ground_vel, _wind_vel, curvature);
+}
+
 void
 FixedWingModeManager::control_auto_takeoff(const hrt_abstime &now, const float control_interval,
 		const Vector2d &global_position, const Vector2f &ground_speed, const position_setpoint_s &pos_sp_curr)
@@ -1106,10 +1217,26 @@ FixedWingModeManager::control_auto_takeoff(const hrt_abstime &now, const float c
 
 	const float takeoff_airspeed = (_param_fw_tko_airspd.get() > FLT_EPSILON) ? _param_fw_tko_airspd.get() :
 				       _param_fw_airspd_min.get();
+	const float estimated_ground_speed = (PX4_ISFINITE(_local_pos.vx) && PX4_ISFINITE(_local_pos.vy)) ?
+					     sqrtf(_local_pos.vx * _local_pos.vx + _local_pos.vy * _local_pos.vy) : NAN;
 
-	if (_runway_takeoff.runwayTakeoffEnabled()) {
-		if (!_runway_takeoff.isInitialized()) {
+	const bool trolley_takeoff_enabled = trolleyTakeoffEnabled();
+	const bool runway_takeoff_enabled = runwayTakeoffEnabled();
+
+	if (trolley_takeoff_enabled || runway_takeoff_enabled) {
+		if (trolley_takeoff_enabled && !_trolley_takeoff.isInitialized()) {
+			_trolley_takeoff.init(now);
+			_runway_takeoff.reset();
+			_takeoff_init_position = global_position;
+			_takeoff_ground_alt = _current_altitude;
+			_launch_current_yaw = _yaw;
+			// _airspeed_slew_rate_controller.setForcedValue(takeoff_airspeed); // TODO
+
+			events::send(events::ID("fixedwing_position_control_trolley_takeoff"), events::Log::Info, "Takeoff on trolley");
+
+		} else if (!trolley_takeoff_enabled && !_runway_takeoff.isInitialized()) {
 			_runway_takeoff.init(now);
+			_trolley_takeoff.reset();
 			_takeoff_init_position = global_position;
 			_takeoff_ground_alt = _current_altitude;
 			_launch_current_yaw = _yaw;
@@ -1119,11 +1246,28 @@ FixedWingModeManager::control_auto_takeoff(const hrt_abstime &now, const float c
 		}
 
 		if (_skipping_takeoff_detection) {
-			_runway_takeoff.forceSetFlyState();
+			if (trolley_takeoff_enabled) {
+				_trolley_takeoff.forceSetFlyState();
+
+			} else {
+				_runway_takeoff.forceSetFlyState();
+			}
 		}
 
-		_runway_takeoff.update(now, takeoff_airspeed, _airspeed_eas, _current_altitude - _takeoff_ground_alt,
-				       clearance_altitude_amsl - _takeoff_ground_alt);
+		if (trolley_takeoff_enabled) {
+			_trolley_takeoff.update(now, takeoff_airspeed, _airspeed_eas, estimated_ground_speed,
+						_current_altitude - _takeoff_ground_alt, clearance_altitude_amsl - _takeoff_ground_alt,
+						trolleyConnectionSignal());
+
+			if (_trolley_takeoff.isAborted()) {
+				publishTrolleyTakeoffAbortSetpoints(now);
+				return;
+			}
+
+		} else {
+			_runway_takeoff.update(now, takeoff_airspeed, _airspeed_eas, _current_altitude - _takeoff_ground_alt,
+					       clearance_altitude_amsl - _takeoff_ground_alt);
+		}
 
 		const Vector2f start_pos_local = _global_local_proj_ref.project(_takeoff_init_position(0), _takeoff_init_position(1));
 		const Vector2f takeoff_waypoint_local = _global_local_proj_ref.project(pos_sp_curr.lat, pos_sp_curr.lon);
@@ -1140,8 +1284,10 @@ FixedWingModeManager::control_auto_takeoff(const hrt_abstime &now, const float c
 			}
 		}
 
-		const DirectionalGuidanceOutput sp = navigateLine(start_pos_local, takeoff_bearing, local_2D_position, ground_speed,
-						     _wind_vel);
+		const DirectionalGuidanceOutput sp = trolley_takeoff_enabled ?
+						     navigateTrolleyPath(start_pos_local, takeoff_bearing, local_2D_position, ground_speed) :
+						     navigateLine(start_pos_local, takeoff_bearing, local_2D_position, ground_speed,
+								     _wind_vel);
 
 		fixed_wing_lateral_setpoint_s fw_lateral_ctrl_sp{empty_lateral_control_setpoint};
 		fw_lateral_ctrl_sp.timestamp = now;
@@ -1153,20 +1299,39 @@ FixedWingModeManager::control_auto_takeoff(const hrt_abstime &now, const float c
 		const float roll_wingtip_strike = getMaxRollAngleNearGround(_current_altitude, _takeoff_ground_alt);
 		_ctrl_configuration_handler.setLateralAccelMax(rollAngleToLateralAccel(roll_wingtip_strike));
 
-		const float pitch_max = _runway_takeoff.getMaxPitch(math::radians(_param_fw_p_lim_max.get()));
-		const float pitch_min = _runway_takeoff.getMinPitch(math::radians(_takeoff_pitch_min.get()),
-					math::radians(_param_fw_p_lim_min.get()));
+		const float pitch_max = trolley_takeoff_enabled ?
+					_trolley_takeoff.getMaxPitch(math::radians(_param_fw_p_lim_max.get())) :
+					_runway_takeoff.getMaxPitch(math::radians(_param_fw_p_lim_max.get()));
+		const float pitch_min = trolley_takeoff_enabled ?
+					_trolley_takeoff.getMinPitch(math::radians(_takeoff_pitch_min.get()),
+								     math::radians(_param_fw_p_lim_min.get())) :
+					_runway_takeoff.getMinPitch(math::radians(_takeoff_pitch_min.get()),
+								    math::radians(_param_fw_p_lim_min.get()));
 
 		const fixed_wing_longitudinal_setpoint_s fw_longitudinal_control_sp = {
 			.timestamp = now,
 			.altitude = altitude_setpoint_amsl,
 			.height_rate = NAN,
 			.equivalent_airspeed = takeoff_airspeed,
-			.pitch_direct = _runway_takeoff.getPitch(),
-			.throttle_direct = _runway_takeoff.getThrottle(_param_fw_thr_idle.get())
+			.pitch_direct = trolley_takeoff_enabled ? _trolley_takeoff.getPitch() : _runway_takeoff.getPitch(),
+			.throttle_direct = trolley_takeoff_enabled ? _trolley_takeoff.getThrottle(_param_fw_thr_idle.get()) :
+					  _runway_takeoff.getThrottle(_param_fw_thr_idle.get())
 		};
 
 		_longitudinal_ctrl_sp_pub.publish(fw_longitudinal_control_sp);
+
+		if (trolley_takeoff_enabled) {
+			float trolley_wheel_setpoint = 0.f;
+
+			if (_trolley_takeoff.pathTrackingSteeringEnabled()) {
+				trolley_wheel_setpoint = _trolley_takeoff.pathTrackingWheelSteeringSetpoint(sp.course_setpoint, _yaw);
+
+			} else if (_trolley_takeoff.openLoopSteeringEnabled()) {
+				trolley_wheel_setpoint = _trolley_takeoff.openLoopWheelSteeringSetpoint();
+			}
+
+			_trolley_takeoff.updateWheelSteeringSetpoint(now, trolley_wheel_setpoint);
+		}
 
 		_ctrl_configuration_handler.setPitchMin(pitch_min);
 		_ctrl_configuration_handler.setPitchMax(pitch_max);
@@ -1175,22 +1340,28 @@ FixedWingModeManager::control_auto_takeoff(const hrt_abstime &now, const float c
 
 		_flaps_setpoint = _param_fw_flaps_to_scl.get();
 
+		const uint8_t takeoff_state = trolley_takeoff_enabled ? static_cast<uint8_t>(_trolley_takeoff.getState()) :
+					      static_cast<uint8_t>(_runway_takeoff.getState());
+
 		// retract ladning gear once passed the climbout state
-		if (_runway_takeoff.getState() > RunwayTakeoffState::CLIMBOUT) {
+		if (takeoff_state > fixed_wing_runway_control_s::STATE_CLIMBOUT) {
 			_new_landing_gear_position = landing_gear_s::GEAR_UP;
 		}
 
 		fixed_wing_runway_control_s fw_runway_control{};
 		fw_runway_control.timestamp = now;
-		fw_runway_control.runway_takeoff_state = _runway_takeoff.getState();
-		fw_runway_control.wheel_steering_enabled = true;
-		fw_runway_control.wheel_steering_nudging_rate = _param_rwto_nudge.get() ? _sticks.getYaw() : 0.f;
+		fw_runway_control.runway_takeoff_state = takeoff_state;
+		fw_runway_control.wheel_steering_enabled = trolley_takeoff_enabled ? _trolley_takeoff.wheelSteeringEnabled() : true;
+		fw_runway_control.wheel_steering_nudging_rate = (trolley_takeoff_enabled ? _trolley_takeoff.wheelNudgingEnabled() :
+				_param_rwto_nudge.get()) ? _sticks.getYaw() : 0.f;
+		fw_runway_control.wheel_steering_direct = trolley_takeoff_enabled && _trolley_takeoff.directWheelSteeringEnabled();
+		fw_runway_control.wheel_steering_setpoint = trolley_takeoff_enabled ? _trolley_takeoff.wheelSteeringSetpoint() : NAN;
 
 		_fixed_wing_runway_control_pub.publish(fw_runway_control);
 
 	} else {
 		/* Perform launch detection */
-		if (!_skipping_takeoff_detection && _param_fw_laun_detcn_on.get() &&
+		if (!_skipping_takeoff_detection && launchDetectionTakeoffEnabled() &&
 		    _launchDetector.getLaunchDetected() < launch_detection_status_s::STATE_FLYING) {
 
 			if (_control_mode.flag_armed) {
@@ -1309,22 +1480,51 @@ FixedWingModeManager::control_auto_takeoff_no_nav(const hrt_abstime &now, const 
 
 	const float takeoff_airspeed = (_param_fw_tko_airspd.get() > FLT_EPSILON) ? _param_fw_tko_airspd.get() :
 				       _param_fw_airspd_min.get();
+	const float estimated_ground_speed = (PX4_ISFINITE(_local_pos.vx) && PX4_ISFINITE(_local_pos.vy)) ?
+					     sqrtf(_local_pos.vx * _local_pos.vx + _local_pos.vy * _local_pos.vy) : NAN;
 
-	if (_runway_takeoff.runwayTakeoffEnabled()) {
-		if (!_runway_takeoff.isInitialized()) {
+	const bool trolley_takeoff_enabled = trolleyTakeoffEnabled();
+	const bool runway_takeoff_enabled = runwayTakeoffEnabled();
+
+	if (trolley_takeoff_enabled || runway_takeoff_enabled) {
+		if (trolley_takeoff_enabled && !_trolley_takeoff.isInitialized()) {
+			_trolley_takeoff.init(now);
+			_runway_takeoff.reset();
+			_takeoff_ground_alt = _current_altitude;
+			_launch_current_yaw = _yaw;
+
+		} else if (!trolley_takeoff_enabled && !_runway_takeoff.isInitialized()) {
 			_runway_takeoff.init(now);
+			_trolley_takeoff.reset();
 			_takeoff_ground_alt = _current_altitude;
 			_launch_current_yaw = _yaw;
 		}
 
 		if (_skipping_takeoff_detection) {
-			_runway_takeoff.forceSetFlyState();
+			if (trolley_takeoff_enabled) {
+				_trolley_takeoff.forceSetFlyState();
+
+			} else {
+				_runway_takeoff.forceSetFlyState();
+			}
 		}
 
 		const float clearance_altitude_amsl = _current_altitude + 20.f; // hard code it to 20m above takeoff point
 
-		_runway_takeoff.update(now, takeoff_airspeed, _airspeed_eas, _current_altitude - _takeoff_ground_alt,
-				       clearance_altitude_amsl - _takeoff_ground_alt);
+		if (trolley_takeoff_enabled) {
+			_trolley_takeoff.update(now, takeoff_airspeed, _airspeed_eas, estimated_ground_speed,
+						_current_altitude - _takeoff_ground_alt, clearance_altitude_amsl - _takeoff_ground_alt,
+						trolleyConnectionSignal());
+
+			if (_trolley_takeoff.isAborted()) {
+				publishTrolleyTakeoffAbortSetpoints(now);
+				return;
+			}
+
+		} else {
+			_runway_takeoff.update(now, takeoff_airspeed, _airspeed_eas, _current_altitude - _takeoff_ground_alt,
+					       clearance_altitude_amsl - _takeoff_ground_alt);
+		}
 
 		fixed_wing_lateral_setpoint_s fw_lateral_ctrl_sp{empty_lateral_control_setpoint};
 		fw_lateral_ctrl_sp.timestamp = now;
@@ -1332,20 +1532,33 @@ FixedWingModeManager::control_auto_takeoff_no_nav(const hrt_abstime &now, const 
 
 		_lateral_ctrl_sp_pub.publish(fw_lateral_ctrl_sp);
 
-		const float pitch_max = _runway_takeoff.getMaxPitch(math::radians(_param_fw_p_lim_max.get()));
-		const float pitch_min = _runway_takeoff.getMinPitch(math::radians(_takeoff_pitch_min.get()),
-					math::radians(_param_fw_p_lim_min.get()));
+		const float pitch_max = trolley_takeoff_enabled ?
+					_trolley_takeoff.getMaxPitch(math::radians(_param_fw_p_lim_max.get())) :
+					_runway_takeoff.getMaxPitch(math::radians(_param_fw_p_lim_max.get()));
+		const float pitch_min = trolley_takeoff_enabled ?
+					_trolley_takeoff.getMinPitch(math::radians(_takeoff_pitch_min.get()),
+								     math::radians(_param_fw_p_lim_min.get())) :
+					_runway_takeoff.getMinPitch(math::radians(_takeoff_pitch_min.get()),
+								    math::radians(_param_fw_p_lim_min.get()));
 
 		const fixed_wing_longitudinal_setpoint_s fw_longitudinal_control_sp = {
 			.timestamp = now,
 			.altitude = NAN,
 			.height_rate = _param_fw_t_clmb_max.get(),
 			.equivalent_airspeed = takeoff_airspeed,
-			.pitch_direct = _runway_takeoff.getPitch(),
-			.throttle_direct = _runway_takeoff.getThrottle(_param_fw_thr_idle.get())
+			.pitch_direct = trolley_takeoff_enabled ? _trolley_takeoff.getPitch() : _runway_takeoff.getPitch(),
+			.throttle_direct = trolley_takeoff_enabled ? _trolley_takeoff.getThrottle(_param_fw_thr_idle.get()) :
+					  _runway_takeoff.getThrottle(_param_fw_thr_idle.get())
 		};
 
 		_longitudinal_ctrl_sp_pub.publish(fw_longitudinal_control_sp);
+
+		if (trolley_takeoff_enabled) {
+			const float trolley_wheel_setpoint = (_trolley_takeoff.openLoopSteeringEnabled()
+							     || _trolley_takeoff.pathTrackingSteeringEnabled()) ?
+							    _trolley_takeoff.openLoopWheelSteeringSetpoint() : 0.f;
+			_trolley_takeoff.updateWheelSteeringSetpoint(now, trolley_wheel_setpoint);
+		}
 
 		_ctrl_configuration_handler.setPitchMin(pitch_min);
 		_ctrl_configuration_handler.setPitchMax(pitch_max);
@@ -1353,22 +1566,28 @@ FixedWingModeManager::control_auto_takeoff_no_nav(const hrt_abstime &now, const 
 
 		_flaps_setpoint = _param_fw_flaps_to_scl.get();
 
+		const uint8_t takeoff_state = trolley_takeoff_enabled ? static_cast<uint8_t>(_trolley_takeoff.getState()) :
+					      static_cast<uint8_t>(_runway_takeoff.getState());
+
 		// retract ladning gear once passed the climbout state
-		if (_runway_takeoff.getState() > RunwayTakeoffState::CLIMBOUT) {
+		if (takeoff_state > fixed_wing_runway_control_s::STATE_CLIMBOUT) {
 			_new_landing_gear_position = landing_gear_s::GEAR_UP;
 		}
 
 		fixed_wing_runway_control_s fw_runway_control{};
 		fw_runway_control.timestamp = now;
-		fw_runway_control.runway_takeoff_state = _runway_takeoff.getState();
-		fw_runway_control.wheel_steering_enabled = true;
-		fw_runway_control.wheel_steering_nudging_rate = _param_rwto_nudge.get() ? _sticks.getYaw() : 0.f;
+		fw_runway_control.runway_takeoff_state = takeoff_state;
+		fw_runway_control.wheel_steering_enabled = trolley_takeoff_enabled ? _trolley_takeoff.wheelSteeringEnabled() : true;
+		fw_runway_control.wheel_steering_nudging_rate = (trolley_takeoff_enabled ? _trolley_takeoff.wheelNudgingEnabled() :
+				_param_rwto_nudge.get()) ? _sticks.getYaw() : 0.f;
+		fw_runway_control.wheel_steering_direct = trolley_takeoff_enabled && _trolley_takeoff.directWheelSteeringEnabled();
+		fw_runway_control.wheel_steering_setpoint = trolley_takeoff_enabled ? _trolley_takeoff.wheelSteeringSetpoint() : NAN;
 
 		_fixed_wing_runway_control_pub.publish(fw_runway_control);
 
 	} else {
 		/* Perform launch detection */
-		if (!_skipping_takeoff_detection && _param_fw_laun_detcn_on.get() &&
+		if (!_skipping_takeoff_detection && launchDetectionTakeoffEnabled() &&
 		    _launchDetector.getLaunchDetected() < launch_detection_status_s::STATE_FLYING) {
 
 			if (_control_mode.flag_armed) {
@@ -2318,6 +2537,7 @@ void
 FixedWingModeManager::reset_takeoff_state()
 {
 	_runway_takeoff.reset();
+	_trolley_takeoff.reset();
 
 	_launchDetector.reset();
 

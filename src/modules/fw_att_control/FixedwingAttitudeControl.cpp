@@ -377,38 +377,45 @@ void FixedwingAttitudeControl::Run()
 		float wheel_u = 0.f;
 
 		if (wheel_controller_enabled) {
-			if (_local_pos_sub.updated()) {
-				vehicle_local_position_s vehicle_local_position;
+			if (runway_control.wheel_steering_direct) {
+				_wheel_ctrl.reset_integrator();
+				_steering_wheel_yaw_setpoint = NAN;
+				wheel_u = (PX4_ISFINITE(runway_control.wheel_steering_setpoint) ?
+					   runway_control.wheel_steering_setpoint : 0.f) + runway_control.wheel_steering_nudging_rate;
 
-				if (_local_pos_sub.copy(&vehicle_local_position)) {
-					_groundspeed = sqrtf(vehicle_local_position.vx * vehicle_local_position.vx + vehicle_local_position.vy *
-							     vehicle_local_position.vy);
+			} else {
+				if (_local_pos_sub.updated()) {
+					vehicle_local_position_s vehicle_local_position;
+
+					if (_local_pos_sub.copy(&vehicle_local_position)) {
+						_groundspeed = sqrtf(vehicle_local_position.vx * vehicle_local_position.vx + vehicle_local_position.vy *
+								     vehicle_local_position.vy);
+					}
 				}
+
+				// Use stall airspeed to calculate ground speed scaling region. Don't scale below gspd_scaling_trim
+				float gspd_scaling_trim = (_param_fw_airspd_stall.get());
+
+				if (_groundspeed > gspd_scaling_trim) {
+					groundspeed_scale = gspd_scaling_trim / _groundspeed;
+
+				}
+
+				// set now yaw setpoint once we're entering the first time
+				if (!PX4_ISFINITE(_steering_wheel_yaw_setpoint)) {
+					_steering_wheel_yaw_setpoint = euler_angles.psi();
+				}
+
+				_wheel_ctrl.control_attitude(_steering_wheel_yaw_setpoint, euler_angles.psi());
+
+				vehicle_angular_velocity_s angular_velocity{};
+				_vehicle_rates_sub.copy(&angular_velocity);
+
+				const float wheel_controller_output = _wheel_ctrl.control_bodyrate(dt, angular_velocity.xyz[2], _groundspeed,
+								groundspeed_scale);
+
+				wheel_u = wheel_controller_output + runway_control.wheel_steering_nudging_rate;
 			}
-
-			// Use stall airspeed to calculate ground speed scaling region. Don't scale below gspd_scaling_trim
-			float gspd_scaling_trim = (_param_fw_airspd_stall.get());
-
-			if (_groundspeed > gspd_scaling_trim) {
-				groundspeed_scale = gspd_scaling_trim / _groundspeed;
-
-			}
-
-			// set now yaw setpoint once we're entering the first time
-			if (!PX4_ISFINITE(_steering_wheel_yaw_setpoint)) {
-				_steering_wheel_yaw_setpoint = euler_angles.psi();
-			}
-
-			_wheel_ctrl.control_attitude(_steering_wheel_yaw_setpoint, euler_angles.psi());
-
-			vehicle_angular_velocity_s angular_velocity{};
-			_vehicle_rates_sub.copy(&angular_velocity);
-
-			const float wheel_controller_output = wheel_controller_enabled ? _wheel_ctrl.control_bodyrate(dt,
-							      angular_velocity.xyz[2], _groundspeed,
-							      groundspeed_scale) : 0.f;
-
-			wheel_u = wheel_controller_output + runway_control.wheel_steering_nudging_rate;
 
 		} else {
 			_wheel_ctrl.reset_integrator();

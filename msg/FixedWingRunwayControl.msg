@@ -13,3 +13,6 @@ uint8 runway_takeoff_state		# Current state of runway takeoff state machine
 
 bool wheel_steering_enabled		# Flag that enables the wheel steering.
 float32 wheel_steering_nudging_rate	# [norm] [@range -1, 1] [FRD] Manual wheel nudging, added to controller output. NAN is interpreted as 0.
+
+bool wheel_steering_direct		# Use wheel_steering_setpoint directly instead of heading/rate wheel controller.
+float32 wheel_steering_setpoint		# [norm] [@range -1, 1] Direct wheel steering command. NAN is interpreted as 0.
