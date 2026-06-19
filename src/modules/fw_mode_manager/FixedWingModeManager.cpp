@@ -33,6 +33,11 @@
 
 #include "FixedWingModeManager.hpp"
 
+#include <errno.h>
+#include <fcntl.h>
+#include <termios.h>
+#include <unistd.h>
+
 #include <cmath>
 #include <px4_platform_common/events.h>
 #include <uORB/topics/longitudinal_control_configuration.h>
@@ -1106,10 +1111,248 @@ FixedWingModeManager::control_auto_path(const float control_interval, const Vect
 }
 
 bool
-FixedWingModeManager::trolleyConnectionSignal() const
+FixedWingModeManager::trolleyCommunicationEnabled() const
 {
-	// TODO: replace this with the pogo-pin GPIO input once the hardware circuit is built.
+	return trolleyTakeoffEnabled() && _param_trolley_com_en.get();
+}
+
+bool
+FixedWingModeManager::trolleyLinkHealthy(const hrt_abstime now) const
+{
+	if (!trolleyCommunicationEnabled()) {
+		return true;
+	}
+
+	return _trolley_serial_fd >= 0
+	       && _trolley_serial_seen_status
+	       && (now - _trolley_serial_last_rx) < (math::max(_param_trolley_com_loss.get(), 0.05f) * 1_s);
+}
+
+const char *
+FixedWingModeManager::trolleySerialDevice() const
+{
+	switch (_param_trolley_com_port.get()) {
+	case 1: return "/dev/ttyS3"; // TELEM2 on Pixhawk 6C
+	case 2: return "/dev/ttyS1"; // TELEM3 on Pixhawk 6C
+	case 3: return "/dev/ttyS5"; // TELEM1 on Pixhawk 6C
+	case 4: return "/dev/ttyS6"; // GPS2 on Pixhawk 6C
+	case 5: return "/dev/ttyS0"; // GPS1 on Pixhawk 6C
+	default: return nullptr;
+	}
+}
+
+int
+FixedWingModeManager::trolleySerialBaudrate() const
+{
+	switch (_param_trolley_com_baud.get()) {
+	case 57600:
+	case 115200:
+	case 230400:
+	case 460800:
+	case 921600:
+		return _param_trolley_com_baud.get();
+
+	default:
+		return 115200;
+	}
+}
+
+void
+FixedWingModeManager::updateTrolleySerialLink(const hrt_abstime now)
+{
+	if (!trolleyCommunicationEnabled()) {
+		closeTrolleySerial();
+		return;
+	}
+
+	if (openTrolleySerial(now)) {
+		pollTrolleySerialStatus(now);
+	}
+}
+
+bool
+FixedWingModeManager::openTrolleySerial(const hrt_abstime now)
+{
+	if (_trolley_serial_fd >= 0) {
+		return true;
+	}
+
+	if ((now - _trolley_serial_last_open_attempt) < 1_s) {
+		return false;
+	}
+
+	_trolley_serial_last_open_attempt = now;
+
+	const char *device = trolleySerialDevice();
+
+	if (device == nullptr) {
+		return false;
+	}
+
+	_trolley_serial_fd = ::open(device, O_RDWR | O_NOCTTY | O_NONBLOCK);
+
+	if (_trolley_serial_fd < 0) {
+		return false;
+	}
+
+	struct termios uart_config {};
+
+	if (tcgetattr(_trolley_serial_fd, &uart_config) < 0) {
+		closeTrolleySerial();
+		return false;
+	}
+
+	cfsetspeed(&uart_config, trolleySerialBaudrate());
+	uart_config.c_cflag |= (CLOCAL | CREAD);
+	uart_config.c_cflag &= ~CSIZE;
+	uart_config.c_cflag |= CS8;
+	uart_config.c_cflag &= ~(PARENB | CSTOPB);
+#ifdef CRTSCTS
+	uart_config.c_cflag &= ~CRTSCTS;
+#endif
+	uart_config.c_lflag &= ~(ICANON | ECHO | ECHOE | ISIG);
+	uart_config.c_iflag &= ~(IXON | IXOFF | IXANY);
+	uart_config.c_oflag &= ~OPOST;
+
+	if (tcsetattr(_trolley_serial_fd, TCSANOW, &uart_config) < 0) {
+		closeTrolleySerial();
+		return false;
+	}
+
+	_trolley_serial_rx_index = 0;
+	_trolley_serial_seen_status = false;
+	_trolley_serial_last_rx = 0;
+
 	return true;
+}
+
+void
+FixedWingModeManager::closeTrolleySerial()
+{
+	if (_trolley_serial_fd >= 0) {
+		::close(_trolley_serial_fd);
+	}
+
+	_trolley_serial_fd = -1;
+	_trolley_serial_rx_index = 0;
+	_trolley_serial_seen_status = false;
+	_trolley_serial_last_rx = 0;
+}
+
+void
+FixedWingModeManager::pollTrolleySerialStatus(const hrt_abstime now)
+{
+	if (_trolley_serial_fd < 0) {
+		return;
+	}
+
+	uint8_t buffer[32] {};
+
+	while (true) {
+		const ssize_t bytes_read = ::read(_trolley_serial_fd, buffer, sizeof(buffer));
+
+		if (bytes_read > 0) {
+			for (ssize_t i = 0; i < bytes_read; ++i) {
+				parseTrolleySerialByte(buffer[i], now);
+			}
+
+		} else if (bytes_read == 0 || errno == EAGAIN) {
+			break;
+
+		} else {
+			closeTrolleySerial();
+			break;
+		}
+	}
+}
+
+void
+FixedWingModeManager::parseTrolleySerialByte(const uint8_t byte, const hrt_abstime now)
+{
+	if (_trolley_serial_rx_index == 0 && byte != 'T') {
+		return;
+	}
+
+	_trolley_serial_rx_buf[_trolley_serial_rx_index++] = byte;
+
+	if (_trolley_serial_rx_index == 2 && _trolley_serial_rx_buf[1] != 'S') {
+		_trolley_serial_rx_index = (byte == 'T') ? 1 : 0;
+		return;
+	}
+
+	if (_trolley_serial_rx_index < TROLLEY_SERIAL_STATUS_LEN) {
+		return;
+	}
+
+	if (_trolley_serial_rx_buf[2] == TROLLEY_SERIAL_VERSION
+	    && _trolley_serial_rx_buf[TROLLEY_SERIAL_STATUS_LEN - 1] == trolleySerialChecksum(_trolley_serial_rx_buf,
+			    TROLLEY_SERIAL_STATUS_LEN - 1)) {
+		_trolley_serial_last_rx = now;
+		_trolley_serial_seen_status = true;
+	}
+
+	_trolley_serial_rx_index = 0;
+}
+
+void
+FixedWingModeManager::sendTrolleySerialCommand(const hrt_abstime now, const float steering_setpoint)
+{
+	if (!trolleyCommunicationEnabled() || _trolley_serial_fd < 0) {
+		return;
+	}
+
+	const bool center_wheels = _trolley_takeoff.isAborted() || _trolley_takeoff.getState() >= trolleytakeoff::CLIMBOUT;
+	const float safe_steering_setpoint = center_wheels ? 0.f : steering_setpoint;
+	const int16_t steering_scaled = static_cast<int16_t>(roundf(math::constrain(safe_steering_setpoint, -1.f, 1.f) * 10000.f));
+	const uint16_t radius_cm = static_cast<uint16_t>(math::constrain(_trolley_takeoff.effectivePathRadius() * 100.f, 0.f,
+				    static_cast<float>(UINT16_MAX)));
+
+	uint8_t flags = TROLLEY_SERIAL_FLAG_ACTIVE;
+
+	if (_trolley_takeoff.isReleased()) {
+		flags |= TROLLEY_SERIAL_FLAG_RELEASED;
+	}
+
+	if (_trolley_takeoff.isAborted()) {
+		flags |= TROLLEY_SERIAL_FLAG_ABORT;
+	}
+
+	if (center_wheels) {
+		flags |= TROLLEY_SERIAL_FLAG_CENTER_WHEELS;
+	}
+
+	uint8_t packet[TROLLEY_SERIAL_COMMAND_LEN] {};
+	packet[0] = 'T';
+	packet[1] = 'C';
+	packet[2] = TROLLEY_SERIAL_VERSION;
+	packet[3] = ++_trolley_serial_tx_seq;
+	packet[4] = static_cast<uint8_t>(_trolley_takeoff.getState());
+	packet[5] = flags;
+	packet[6] = static_cast<uint8_t>(steering_scaled & 0xff);
+	packet[7] = static_cast<uint8_t>((steering_scaled >> 8) & 0xff);
+	packet[8] = static_cast<uint8_t>(_trolley_takeoff.pathType());
+	packet[9] = static_cast<uint8_t>(radius_cm & 0xff);
+	packet[10] = static_cast<uint8_t>((radius_cm >> 8) & 0xff);
+	packet[11] = 0;
+	packet[12] = trolleySerialChecksum(packet, TROLLEY_SERIAL_COMMAND_LEN - 1);
+
+	const ssize_t written = ::write(_trolley_serial_fd, packet, sizeof(packet));
+
+	if (written < 0 && errno != EAGAIN) {
+		closeTrolleySerial();
+	}
+}
+
+uint8_t
+FixedWingModeManager::trolleySerialChecksum(const uint8_t *buffer, const uint8_t length) const
+{
+	uint8_t checksum = 0;
+
+	for (uint8_t i = 0; i < length; ++i) {
+		checksum ^= buffer[i];
+	}
+
+	return checksum;
 }
 
 void
@@ -1140,9 +1383,9 @@ FixedWingModeManager::publishTrolleyTakeoffAbortSetpoints(const hrt_abstime &now
 	fixed_wing_runway_control_s fw_runway_control{};
 	fw_runway_control.timestamp = now;
 	fw_runway_control.runway_takeoff_state = fixed_wing_runway_control_s::STATE_FLYING;
-	fw_runway_control.wheel_steering_enabled = false;
+	fw_runway_control.wheel_steering_enabled = true;
 	fw_runway_control.wheel_steering_nudging_rate = 0.f;
-	fw_runway_control.wheel_steering_direct = false;
+	fw_runway_control.wheel_steering_direct = true;
 	fw_runway_control.wheel_steering_setpoint = 0.f;
 
 	_fixed_wing_runway_control_pub.publish(fw_runway_control);
@@ -1222,10 +1465,12 @@ FixedWingModeManager::control_auto_takeoff(const hrt_abstime &now, const float c
 
 	const bool trolley_takeoff_enabled = trolleyTakeoffEnabled();
 	const bool runway_takeoff_enabled = runwayTakeoffEnabled();
+	const bool trolley_link_required = trolleyCommunicationEnabled();
+	const bool trolley_link_healthy = trolleyLinkHealthy(now);
 
 	if (trolley_takeoff_enabled || runway_takeoff_enabled) {
 		if (trolley_takeoff_enabled && !_trolley_takeoff.isInitialized()) {
-			_trolley_takeoff.init(now);
+			_trolley_takeoff.init(now, trolley_link_required, trolley_link_healthy);
 			_runway_takeoff.reset();
 			_takeoff_init_position = global_position;
 			_takeoff_ground_alt = _current_altitude;
@@ -1257,9 +1502,10 @@ FixedWingModeManager::control_auto_takeoff(const hrt_abstime &now, const float c
 		if (trolley_takeoff_enabled) {
 			_trolley_takeoff.update(now, takeoff_airspeed, _airspeed_eas, estimated_ground_speed,
 						_current_altitude - _takeoff_ground_alt, clearance_altitude_amsl - _takeoff_ground_alt,
-						trolleyConnectionSignal());
+						trolley_link_required, trolley_link_healthy);
 
 			if (_trolley_takeoff.isAborted()) {
+				sendTrolleySerialCommand(now, 0.f);
 				publishTrolleyTakeoffAbortSetpoints(now);
 				return;
 			}
@@ -1331,6 +1577,8 @@ FixedWingModeManager::control_auto_takeoff(const hrt_abstime &now, const float c
 			}
 
 			_trolley_takeoff.updateWheelSteeringSetpoint(now, trolley_wheel_setpoint);
+			const float trolley_nudge = _trolley_takeoff.wheelNudgingEnabled() ? _sticks.getYaw() : 0.f;
+			sendTrolleySerialCommand(now, _trolley_takeoff.wheelSteeringSetpoint() + trolley_nudge);
 		}
 
 		_ctrl_configuration_handler.setPitchMin(pitch_min);
@@ -1351,11 +1599,15 @@ FixedWingModeManager::control_auto_takeoff(const hrt_abstime &now, const float c
 		fixed_wing_runway_control_s fw_runway_control{};
 		fw_runway_control.timestamp = now;
 		fw_runway_control.runway_takeoff_state = takeoff_state;
-		fw_runway_control.wheel_steering_enabled = trolley_takeoff_enabled ? _trolley_takeoff.wheelSteeringEnabled() : true;
-		fw_runway_control.wheel_steering_nudging_rate = (trolley_takeoff_enabled ? _trolley_takeoff.wheelNudgingEnabled() :
-				_param_rwto_nudge.get()) ? _sticks.getYaw() : 0.f;
-		fw_runway_control.wheel_steering_direct = trolley_takeoff_enabled && _trolley_takeoff.directWheelSteeringEnabled();
-		fw_runway_control.wheel_steering_setpoint = trolley_takeoff_enabled ? _trolley_takeoff.wheelSteeringSetpoint() : NAN;
+		fw_runway_control.wheel_steering_enabled = trolley_takeoff_enabled ?
+				(trolley_link_required || _trolley_takeoff.wheelSteeringEnabled()) : true;
+		fw_runway_control.wheel_steering_nudging_rate = (trolley_takeoff_enabled && trolley_link_required) ? 0.f :
+				((trolley_takeoff_enabled ? _trolley_takeoff.wheelNudgingEnabled() : _param_rwto_nudge.get()) ?
+				 _sticks.getYaw() : 0.f);
+		fw_runway_control.wheel_steering_direct = trolley_takeoff_enabled
+				&& (trolley_link_required || _trolley_takeoff.directWheelSteeringEnabled());
+		fw_runway_control.wheel_steering_setpoint = trolley_takeoff_enabled ?
+				(trolley_link_required ? 0.f : _trolley_takeoff.wheelSteeringSetpoint()) : NAN;
 
 		_fixed_wing_runway_control_pub.publish(fw_runway_control);
 
@@ -1485,10 +1737,12 @@ FixedWingModeManager::control_auto_takeoff_no_nav(const hrt_abstime &now, const 
 
 	const bool trolley_takeoff_enabled = trolleyTakeoffEnabled();
 	const bool runway_takeoff_enabled = runwayTakeoffEnabled();
+	const bool trolley_link_required = trolleyCommunicationEnabled();
+	const bool trolley_link_healthy = trolleyLinkHealthy(now);
 
 	if (trolley_takeoff_enabled || runway_takeoff_enabled) {
 		if (trolley_takeoff_enabled && !_trolley_takeoff.isInitialized()) {
-			_trolley_takeoff.init(now);
+			_trolley_takeoff.init(now, trolley_link_required, trolley_link_healthy);
 			_runway_takeoff.reset();
 			_takeoff_ground_alt = _current_altitude;
 			_launch_current_yaw = _yaw;
@@ -1514,9 +1768,10 @@ FixedWingModeManager::control_auto_takeoff_no_nav(const hrt_abstime &now, const 
 		if (trolley_takeoff_enabled) {
 			_trolley_takeoff.update(now, takeoff_airspeed, _airspeed_eas, estimated_ground_speed,
 						_current_altitude - _takeoff_ground_alt, clearance_altitude_amsl - _takeoff_ground_alt,
-						trolleyConnectionSignal());
+						trolley_link_required, trolley_link_healthy);
 
 			if (_trolley_takeoff.isAborted()) {
+				sendTrolleySerialCommand(now, 0.f);
 				publishTrolleyTakeoffAbortSetpoints(now);
 				return;
 			}
@@ -1558,6 +1813,8 @@ FixedWingModeManager::control_auto_takeoff_no_nav(const hrt_abstime &now, const 
 							     || _trolley_takeoff.pathTrackingSteeringEnabled()) ?
 							    _trolley_takeoff.openLoopWheelSteeringSetpoint() : 0.f;
 			_trolley_takeoff.updateWheelSteeringSetpoint(now, trolley_wheel_setpoint);
+			const float trolley_nudge = _trolley_takeoff.wheelNudgingEnabled() ? _sticks.getYaw() : 0.f;
+			sendTrolleySerialCommand(now, _trolley_takeoff.wheelSteeringSetpoint() + trolley_nudge);
 		}
 
 		_ctrl_configuration_handler.setPitchMin(pitch_min);
@@ -1577,11 +1834,15 @@ FixedWingModeManager::control_auto_takeoff_no_nav(const hrt_abstime &now, const 
 		fixed_wing_runway_control_s fw_runway_control{};
 		fw_runway_control.timestamp = now;
 		fw_runway_control.runway_takeoff_state = takeoff_state;
-		fw_runway_control.wheel_steering_enabled = trolley_takeoff_enabled ? _trolley_takeoff.wheelSteeringEnabled() : true;
-		fw_runway_control.wheel_steering_nudging_rate = (trolley_takeoff_enabled ? _trolley_takeoff.wheelNudgingEnabled() :
-				_param_rwto_nudge.get()) ? _sticks.getYaw() : 0.f;
-		fw_runway_control.wheel_steering_direct = trolley_takeoff_enabled && _trolley_takeoff.directWheelSteeringEnabled();
-		fw_runway_control.wheel_steering_setpoint = trolley_takeoff_enabled ? _trolley_takeoff.wheelSteeringSetpoint() : NAN;
+		fw_runway_control.wheel_steering_enabled = trolley_takeoff_enabled ?
+				(trolley_link_required || _trolley_takeoff.wheelSteeringEnabled()) : true;
+		fw_runway_control.wheel_steering_nudging_rate = (trolley_takeoff_enabled && trolley_link_required) ? 0.f :
+				((trolley_takeoff_enabled ? _trolley_takeoff.wheelNudgingEnabled() : _param_rwto_nudge.get()) ?
+				 _sticks.getYaw() : 0.f);
+		fw_runway_control.wheel_steering_direct = trolley_takeoff_enabled
+				&& (trolley_link_required || _trolley_takeoff.directWheelSteeringEnabled());
+		fw_runway_control.wheel_steering_setpoint = trolley_takeoff_enabled ?
+				(trolley_link_required ? 0.f : _trolley_takeoff.wheelSteeringSetpoint()) : NAN;
 
 		_fixed_wing_runway_control_pub.publish(fw_runway_control);
 
@@ -2394,6 +2655,8 @@ FixedWingModeManager::Run()
 
 		Vector2d curr_pos(_current_latitude, _current_longitude);
 		Vector2f ground_speed(_local_pos.vx, _local_pos.vy);
+
+		updateTrolleySerialLink(now);
 
 		set_control_mode_current(now);
 

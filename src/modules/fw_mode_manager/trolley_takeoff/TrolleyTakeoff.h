@@ -78,11 +78,11 @@ public:
 	TrolleyTakeoff(ModuleParams *parent) : ModuleParams(parent) {}
 	~TrolleyTakeoff() = default;
 
-	void init(const hrt_abstime &time_now);
+	void init(const hrt_abstime &time_now, const bool trolley_link_required, const bool trolley_link_healthy);
 
 	void update(const hrt_abstime &time_now, const float takeoff_airspeed, const float calibrated_airspeed,
 		    const float estimated_ground_speed, const float vehicle_altitude, const float clearance_altitude,
-		    const bool trolley_connection_signal);
+		    const bool trolley_link_required, const bool trolley_link_healthy);
 
 	TrolleyTakeoffState getState() const { return takeoff_state_; }
 
@@ -90,9 +90,7 @@ public:
 
 	bool wheelNudgingEnabled() const { return param_trolley_nudge_.get() && takeoff_state_ < TrolleyTakeoffState::CLIMBOUT; }
 
-	bool connectionSensorEnabled() const { return param_trolley_conn_en_.get(); }
-
-	bool connectionHealthy() const { return !connectionSensorEnabled() || trolley_connected_; }
+	bool linkHealthy() const { return trolley_link_healthy_; }
 
 	bool isReleased() const { return release_authorized_; }
 
@@ -156,7 +154,7 @@ public:
 						const float interpolation_time) const;
 
 private:
-	void updateConnectionState(const hrt_abstime &time_now, const bool trolley_connection_signal);
+	void updateLinkState(const bool trolley_link_required, const bool trolley_link_healthy);
 
 	float rotationAirspeedThreshold(const float takeoff_airspeed) const;
 
@@ -169,9 +167,7 @@ private:
 
 	bool initialized_{false};
 
-	bool trolley_connected_{true};
-
-	bool raw_trolley_connected_{true};
+	bool trolley_link_healthy_{true};
 
 	bool release_authorized_{false};
 
@@ -184,8 +180,6 @@ private:
 	hrt_abstime time_initialized_{0};
 
 	hrt_abstime takeoff_time_{0};
-
-	hrt_abstime time_connection_signal_changed_{0};
 
 	hrt_abstime time_last_steering_update_{0};
 
@@ -207,10 +201,7 @@ private:
 		(ParamFloat<px4::params::TROLLEY_STR_MAX>) param_trolley_str_max_,
 		(ParamFloat<px4::params::TROLLEY_TRK_GAIN>) param_trolley_trk_gain_,
 		(ParamFloat<px4::params::TROLLEY_STR_RATE>) param_trolley_str_rate_,
-		(ParamFloat<px4::params::TROLLEY_STR_HOLD>) param_trolley_str_hold_,
-		(ParamBool<px4::params::TROLLEY_CONN_EN>) param_trolley_conn_en_,
-		(ParamBool<px4::params::TROLLEY_CONN_INV>) param_trolley_conn_inv_,
-		(ParamFloat<px4::params::TROLLEY_CONN_DB>) param_trolley_conn_debounce_
+		(ParamFloat<px4::params::TROLLEY_STR_HOLD>) param_trolley_str_hold_
 	)
 };
 

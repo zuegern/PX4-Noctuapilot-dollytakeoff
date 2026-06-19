@@ -46,6 +46,7 @@
 #include "ControllerConfigurationHandler.hpp"
 
 #include <float.h>
+#include <stdint.h>
 #include <drivers/drv_hrt.h>
 #include <lib/geo/geo.h>
 #include <lib/atmosphere/atmosphere.h>
@@ -325,6 +326,25 @@ private:
 
 	// class handling trolley-assisted takeoff for fixed-wing UAVs
 	trolleytakeoff::TrolleyTakeoff _trolley_takeoff;
+
+	enum TrolleySerialFlags : uint8_t {
+		TROLLEY_SERIAL_FLAG_ACTIVE = (1 << 0),
+		TROLLEY_SERIAL_FLAG_RELEASED = (1 << 1),
+		TROLLEY_SERIAL_FLAG_ABORT = (1 << 2),
+		TROLLEY_SERIAL_FLAG_CENTER_WHEELS = (1 << 3)
+	};
+
+	static constexpr uint8_t TROLLEY_SERIAL_VERSION = 1;
+	static constexpr uint8_t TROLLEY_SERIAL_COMMAND_LEN = 13;
+	static constexpr uint8_t TROLLEY_SERIAL_STATUS_LEN = 8;
+
+	int _trolley_serial_fd{-1};
+	uint8_t _trolley_serial_tx_seq{0};
+	uint8_t _trolley_serial_rx_buf[TROLLEY_SERIAL_STATUS_LEN]{};
+	uint8_t _trolley_serial_rx_index{0};
+	hrt_abstime _trolley_serial_last_rx{0};
+	hrt_abstime _trolley_serial_last_open_attempt{0};
+	bool _trolley_serial_seen_status{false};
 
 	bool _skipping_takeoff_detection{false};
 
@@ -606,12 +626,17 @@ private:
 	void control_auto_takeoff_no_nav(const hrt_abstime &now, const float control_interval,
 					 const float altitude_setpoint_amsl);
 
-	/**
-	 * @brief Raw trolley connection signal.
-	 *
-	 * This currently returns a safe placeholder until the pogo-pin input is wired into PX4.
-	 */
-	bool trolleyConnectionSignal() const;
+	bool trolleyCommunicationEnabled() const;
+	bool trolleyLinkHealthy(const hrt_abstime now) const;
+	const char *trolleySerialDevice() const;
+	int trolleySerialBaudrate() const;
+	void updateTrolleySerialLink(const hrt_abstime now);
+	bool openTrolleySerial(const hrt_abstime now);
+	void closeTrolleySerial();
+	void pollTrolleySerialStatus(const hrt_abstime now);
+	void parseTrolleySerialByte(const uint8_t byte, const hrt_abstime now);
+	void sendTrolleySerialCommand(const hrt_abstime now, const float steering_setpoint);
+	uint8_t trolleySerialChecksum(const uint8_t *buffer, const uint8_t length) const;
 
 	/**
 	 * @brief Publishes conservative control setpoints after a bad trolley disconnect.
@@ -911,6 +936,10 @@ private:
 		// Takeoff method parameters
 		(ParamInt<px4::params::FW_TKOFF_METHOD>) _param_fw_tkoff_method,
 		(ParamFloat<px4::params::FW_LAUN_CS_LK_DY>) _param_fw_laun_cs_lk_dy,
+		(ParamBool<px4::params::TROLLEY_COM_EN>) _param_trolley_com_en,
+		(ParamInt<px4::params::TROLLEY_COM_PORT>) _param_trolley_com_port,
+		(ParamInt<px4::params::TROLLEY_COM_BAUD>) _param_trolley_com_baud,
+		(ParamFloat<px4::params::TROLLEY_COM_LOSS>) _param_trolley_com_loss,
 
 		// external parameters
 		(ParamBool<px4::params::FW_USE_AIRSPD>) _param_fw_use_airspd,

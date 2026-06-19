@@ -48,29 +48,28 @@ using namespace time_literals;
 namespace trolleytakeoff
 {
 
-	void TrolleyTakeoff::init(const hrt_abstime &time_now)
+	void TrolleyTakeoff::init(const hrt_abstime &time_now, const bool trolley_link_required, const bool trolley_link_healthy)
 	{
 		takeoff_state_ = TrolleyTakeoffState::THROTTLE_RAMP;
 		initialized_ = true;
 		time_initialized_ = time_now;
 		takeoff_time_ = 0;
-		time_connection_signal_changed_ = time_now;
 		time_last_steering_update_ = time_now;
-		trolley_connected_ = true;
-		raw_trolley_connected_ = true;
+		trolley_link_healthy_ = true;
 		release_authorized_ = false;
 		bad_disconnect_detected_ = false;
 		good_disconnect_detected_ = false;
 		wheel_steering_setpoint_ = 0.f;
+		updateLinkState(trolley_link_required, trolley_link_healthy);
 	}
 
 	void TrolleyTakeoff::update(const hrt_abstime &time_now, const float takeoff_airspeed, const float calibrated_airspeed,
 				    const float estimated_ground_speed, const float vehicle_altitude, const float clearance_altitude,
-				    const bool trolley_connection_signal)
+				    const bool trolley_link_required, const bool trolley_link_healthy)
 	{
-		updateConnectionState(time_now, trolley_connection_signal);
+		updateLinkState(trolley_link_required, trolley_link_healthy);
 
-		if (connectionSensorEnabled() && !trolley_connected_)
+		if (trolley_link_required && !trolley_link_healthy_)
 		{
 			if (!release_authorized_ && !bad_disconnect_detected_)
 			{
@@ -78,14 +77,14 @@ namespace trolleytakeoff
 				wheel_steering_setpoint_ = 0.f;
 				bad_disconnect_detected_ = true;
 				events::send(events::ID("trolley_takeoff_bad_disconnect"), events::Log::Critical,
-					     "Trolley disconnected before release, aborting takeoff");
+					     "Trolley link lost before release, aborting takeoff");
 			}
 
 			if (release_authorized_ && !good_disconnect_detected_)
 			{
 				good_disconnect_detected_ = true;
 				events::send(events::ID("trolley_takeoff_released"), events::Log::Info,
-					     "Trolley disconnected after release");
+					     "Trolley link lost after release");
 			}
 		}
 
@@ -354,28 +353,9 @@ namespace trolleytakeoff
 		}
 	}
 
-	void TrolleyTakeoff::updateConnectionState(const hrt_abstime &time_now, const bool trolley_connection_signal)
+	void TrolleyTakeoff::updateLinkState(const bool trolley_link_required, const bool trolley_link_healthy)
 	{
-		if (!connectionSensorEnabled())
-		{
-			trolley_connected_ = true;
-			raw_trolley_connected_ = true;
-			time_connection_signal_changed_ = time_now;
-			return;
-		}
-
-		const bool connected = param_trolley_conn_inv_.get() ? !trolley_connection_signal : trolley_connection_signal;
-
-		if (connected != raw_trolley_connected_)
-		{
-			raw_trolley_connected_ = connected;
-			time_connection_signal_changed_ = time_now;
-		}
-
-		if ((time_now - time_connection_signal_changed_) > (param_trolley_conn_debounce_.get() * 1_s))
-		{
-			trolley_connected_ = raw_trolley_connected_;
-		}
+		trolley_link_healthy_ = !trolley_link_required || trolley_link_healthy;
 	}
 
 	float TrolleyTakeoff::getPitch() const
@@ -474,10 +454,8 @@ namespace trolleytakeoff
 		initialized_ = false;
 		takeoff_state_ = TrolleyTakeoffState::THROTTLE_RAMP;
 		takeoff_time_ = 0;
-		time_connection_signal_changed_ = 0;
 		time_last_steering_update_ = 0;
-		trolley_connected_ = true;
-		raw_trolley_connected_ = true;
+		trolley_link_healthy_ = true;
 		release_authorized_ = false;
 		bad_disconnect_detected_ = false;
 		good_disconnect_detected_ = false;
