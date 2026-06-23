@@ -17,6 +17,8 @@ parameters:
         short: Pitch setpoint while attached to trolley
         long: |-
           Pitch setpoint before trolley release or takeoff rotation airspeed is reached.
+
+          This setpoint is only used while the aircraft is physically attached to the trolley. Once trolley takeoff enters climbout, PX4 immediately uses the normal fixed-wing climbout pitch limits.
       type: float
       default: 0.0
       unit: deg
@@ -98,16 +100,6 @@ parameters:
       max: 120.0
       decimal: 1
       increment: 0.5
-    TROLLEY_ROT_TIME:
-      description:
-        short: Trolley takeoff rotation time
-        long: This is the time desired to linearly ramp in takeoff pitch constraints during trolley takeoff rotation.
-      type: float
-      default: 1.0
-      unit: s
-      min: 0.1
-      decimal: 1
-      increment: 0.1
     TROLLEY_STR_MODE:
       description:
         short: Trolley steering mode
@@ -229,21 +221,26 @@ parameters:
       max: 5.0
       decimal: 2
       increment: 0.1
-    TROLLEY_COM_EN:
+    TROLLEY_SRV_CTL:
       description:
-        short: Enable trolley Arduino serial link
+        short: Trolley steering servo control source
         long: |-
-          Enables the serial link to the trolley Arduino servo controller.
+          Selects how trolley steering servos are controlled during trolley takeoff.
 
-          When enabled, PX4 sends the trolley steering command to the Arduino and uses Arduino status packets as the trolley connection monitor.
-          If the link is lost before trolley release, trolley takeoff aborts. If the link is lost after release, it is treated as the expected disconnect.
-      type: boolean
+          Direct Pixhawk PWM uses the fixed-wing wheel steering output, so assign the trolley steering servos to Landing Gear Wheel outputs in QGroundControl. This is the same direct-servo setup used before the Raspberry Pi Pico helper.
+          Raspberry Pi Pico serial sends the trolley steering command to the Pico and uses Pico status packets as the trolley connection monitor. If the serial link is lost before trolley release, trolley takeoff aborts. If the link is lost after release, it is treated as the expected disconnect.
+      type: enum
+      values:
+        0: Direct Pixhawk PWM
+        1: Raspberry Pi Pico serial
       default: 0
+      min: 0
+      max: 1
     TROLLEY_COM_PORT:
       description:
-        short: Trolley Arduino serial port
+        short: Trolley Pico serial port
         long: |-
-          Selects the Pixhawk 6C serial port used for the trolley Arduino servo controller.
+          Selects the Pixhawk 6C serial port used for the trolley Raspberry Pi Pico servo controller.
 
           The selected port must not also be used by MAVLink, GPS, or another driver.
       type: enum
@@ -258,9 +255,9 @@ parameters:
       max: 5
     TROLLEY_COM_BAUD:
       description:
-        short: Trolley Arduino serial baud rate
+        short: Trolley Pico serial baud rate
         long: |-
-          Baud rate for the trolley Arduino servo-controller serial link.
+          Baud rate for the trolley Raspberry Pi Pico servo-controller serial link.
       type: enum
       values:
         57600: 57600
@@ -273,9 +270,9 @@ parameters:
       max: 921600
     TROLLEY_COM_LOSS:
       description:
-        short: Trolley Arduino link-loss timeout
+        short: Trolley Pico link-loss timeout
         long: |-
-          Maximum time without an Arduino status packet before PX4 considers the trolley link lost.
+          Maximum time without a Raspberry Pi Pico status packet before PX4 considers the trolley link lost.
 
           Keep this short enough to detect a bad disconnect before the trolley accelerates far, but long enough to tolerate a few dropped serial packets.
       type: float

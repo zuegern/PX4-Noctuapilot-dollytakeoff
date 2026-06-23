@@ -1113,7 +1113,7 @@ FixedWingModeManager::control_auto_path(const float control_interval, const Vect
 bool
 FixedWingModeManager::trolleyCommunicationEnabled() const
 {
-	return trolleyTakeoffEnabled() && _param_trolley_com_en.get();
+	return trolleyTakeoffEnabled() && _param_trolley_servo_ctl.get() == TROLLEY_SERVO_CONTROL_ARDUINO;
 }
 
 bool
@@ -1391,6 +1391,23 @@ FixedWingModeManager::publishTrolleyTakeoffAbortSetpoints(const hrt_abstime &now
 	_fixed_wing_runway_control_pub.publish(fw_runway_control);
 }
 
+void
+FixedWingModeManager::sendTrolleyTakeoffExitCommand(const hrt_abstime &now)
+{
+	if (!_trolley_takeoff.isInitialized()) {
+		return;
+	}
+
+	if (!_trolley_takeoff.isReleased()) {
+		_trolley_takeoff.abort();
+
+	} else {
+		_trolley_takeoff.updateWheelSteeringSetpoint(now, 0.f);
+	}
+
+	sendTrolleySerialCommand(now, 0.f);
+}
+
 DirectionalGuidanceOutput
 FixedWingModeManager::navigateTrolleyPath(const Vector2f &start_pos_local, const float takeoff_bearing,
 		const Vector2f &vehicle_pos, const Vector2f &ground_vel)
@@ -1446,6 +1463,11 @@ FixedWingModeManager::control_auto_takeoff(const hrt_abstime &now, const float c
 {
 	if (!_control_mode.flag_armed) {
 		reset_takeoff_state();
+
+		if (trolleyTakeoffEnabled()) {
+			publishTrolleyTakeoffAbortSetpoints(now);
+			return;
+		}
 	}
 
 	// for now taking current position setpoint altitude as clearance altitude. this is the altitude we need to
@@ -1728,6 +1750,11 @@ FixedWingModeManager::control_auto_takeoff_no_nav(const hrt_abstime &now, const 
 {
 	if (!_control_mode.flag_armed) {
 		reset_takeoff_state();
+
+		if (trolleyTakeoffEnabled()) {
+			publishTrolleyTakeoffAbortSetpoints(now);
+			return;
+		}
 	}
 
 	const float takeoff_airspeed = (_param_fw_tko_airspd.get() > FLT_EPSILON) ? _param_fw_tko_airspd.get() :
@@ -2799,6 +2826,8 @@ FixedWingModeManager::Run()
 void
 FixedWingModeManager::reset_takeoff_state()
 {
+	sendTrolleyTakeoffExitCommand(hrt_absolute_time());
+
 	_runway_takeoff.reset();
 	_trolley_takeoff.reset();
 

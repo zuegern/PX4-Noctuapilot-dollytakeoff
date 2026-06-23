@@ -1,9 +1,9 @@
 /*
- * PX4 trolley takeoff servo controller.
+ * PX4 trolley takeoff servo controller for Raspberry Pi Pico H.
  *
- * The Arduino always drives the trolley steering servos. PX4 sends steering
- * commands over UART while the aircraft is attached to the trolley. If the
- * UART link is lost, the controller slowly returns both wheels to center.
+ * The Raspberry Pi Pico drives the trolley steering servos. PX4 sends
+ * steering commands over UART while the aircraft is attached to the trolley.
+ * If the UART link is lost, the Pico slowly returns both wheels to center.
  */
 
 #include <Servo.h>
@@ -30,10 +30,15 @@ static constexpr uint32_t kStatusPeriodMs = 20;
 static constexpr float kCommandSlewPerSecond = 3.0f;
 static constexpr float kFailsafeCenterSlewPerSecond = 0.8f;
 
-static constexpr int kLeftServoPin = 9;
-static constexpr int kRightServoPin = 10;
+// Raspberry Pi Pico H UART0 pins for the Pixhawk link.
+static constexpr int kPixhawkTxPin = 0; // Pico GP0 / UART0 TX -> Pixhawk RX
+static constexpr int kPixhawkRxPin = 1; // Pico GP1 / UART0 RX <- Pixhawk TX
 
-// Calibrate these for your trolley. Values are PWM microseconds.
+// Servo signal pins on the Raspberry Pi Pico H.
+static constexpr int kLeftServoPin = 14;  // Pico GP14
+static constexpr int kRightServoPin = 15; // Pico GP15
+
+// Calibrate these for your trolley. Values are servo PWM microseconds.
 static constexpr int kLeftMinUs = 1100;
 static constexpr int kLeftCenterUs = 1500;
 static constexpr int kLeftMaxUs = 1900;
@@ -101,7 +106,8 @@ float slew(const float current, const float target, const float rate_per_second,
 	return target;
 }
 
-int servoPulseFromSteering(float steering, const int min_us, const int center_us, const int max_us, const bool reversed)
+int servoPulseFromSteering(float steering, const int min_us, const int center_us, const int max_us,
+			   const bool reversed)
 {
 	steering = constrainSteering(reversed ? -steering : steering);
 
@@ -114,8 +120,10 @@ int servoPulseFromSteering(float steering, const int min_us, const int center_us
 
 void writeServos(const float steering)
 {
-	left_servo.writeMicroseconds(servoPulseFromSteering(steering, kLeftMinUs, kLeftCenterUs, kLeftMaxUs, kLeftReversed));
-	right_servo.writeMicroseconds(servoPulseFromSteering(steering, kRightMinUs, kRightCenterUs, kRightMaxUs, kRightReversed));
+	left_servo.writeMicroseconds(servoPulseFromSteering(steering, kLeftMinUs, kLeftCenterUs, kLeftMaxUs,
+				     kLeftReversed));
+	right_servo.writeMicroseconds(servoPulseFromSteering(steering, kRightMinUs, kRightCenterUs, kRightMaxUs,
+				      kRightReversed));
 }
 
 void handleCommandPacket()
@@ -172,6 +180,11 @@ void sendStatus(const bool command_fresh, const bool failsafe_centering)
 void setup()
 {
 	Serial.begin(115200);
+
+#if defined(ARDUINO_ARCH_RP2040)
+	PixhawkSerial.setTX(kPixhawkTxPin);
+	PixhawkSerial.setRX(kPixhawkRxPin);
+#endif
 	PixhawkSerial.begin(115200);
 
 	left_servo.attach(kLeftServoPin);

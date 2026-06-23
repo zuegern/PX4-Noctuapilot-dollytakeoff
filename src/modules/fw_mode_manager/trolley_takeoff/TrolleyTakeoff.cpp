@@ -148,6 +148,17 @@ namespace trolleytakeoff
 		       && hrt_elapsed_time(&takeoff_time_) < (param_trolley_str_hold_.get() * 1_s);
 	}
 
+	void TrolleyTakeoff::abort()
+	{
+		if (takeoff_state_ < TrolleyTakeoffState::CLIMBOUT)
+		{
+			takeoff_state_ = TrolleyTakeoffState::ABORTED;
+			release_authorized_ = false;
+		}
+
+		wheel_steering_setpoint_ = 0.f;
+	}
+
 	bool TrolleyTakeoff::directWheelSteeringEnabled() const
 	{
 		if (!wheelSteeringEnabled())
@@ -416,9 +427,7 @@ namespace trolleytakeoff
 
 		else if (takeoff_state_ < TrolleyTakeoffState::FLYING)
 		{
-			const float trolley_pitch_min = math::radians(param_trolley_psp_.get() - 0.01f);
-			return interpolateValuesOverAbsoluteTime(trolley_pitch_min, min_pitch_in_climbout, takeoff_time_,
-					param_trolley_rot_time_.get());
+			return min_pitch_in_climbout;
 
 		}
 
@@ -438,8 +447,7 @@ namespace trolleytakeoff
 
 		else if (takeoff_state_ < TrolleyTakeoffState::FLYING)
 		{
-			const float trolley_pitch_max = math::radians(param_trolley_psp_.get() + 0.01f);
-			return interpolateValuesOverAbsoluteTime(trolley_pitch_max, max_pitch, takeoff_time_, param_trolley_rot_time_.get());
+			return max_pitch;
 
 		}
 
@@ -465,6 +473,11 @@ namespace trolleytakeoff
 	float TrolleyTakeoff::interpolateValuesOverAbsoluteTime(const float start_value, const float end_value,
 			const hrt_abstime &start_time, const float interpolation_time) const
 	{
+		if (interpolation_time <= FLT_EPSILON)
+		{
+			return end_value;
+		}
+
 		const float seconds_since_start = hrt_elapsed_time(&start_time) * 1.e-6f;
 		const float interpolator = math::constrain(seconds_since_start / interpolation_time, 0.0f, 1.0f);
 

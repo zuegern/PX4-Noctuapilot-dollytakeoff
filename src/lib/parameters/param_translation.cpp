@@ -79,6 +79,16 @@ param_modify_on_import_ret param_modify_on_import(bson_node_t node)
 		}
 	}
 
+	// 2026-06-22: translate trolley serial-controller boolean to trolley servo-control selector
+	{
+		if (strcmp("TROLLEY_COM_EN", node->name) == 0) {
+			node->i32 = node->i32 != 0 ? 1 : 0;
+			strcpy(node->name, "TROLLEY_SRV_CTL");
+			PX4_INFO("migrating %s -> %s", "TROLLEY_COM_EN", "TROLLEY_SRV_CTL");
+			return param_modify_on_import_ret::PARAM_MODIFIED;
+		}
+	}
+
 	// 2023-12-06: translate and invert FW_ARSP_MODE-> FW_USE_AIRSPD
 	{
 		if (strcmp("FW_ARSP_MODE", node->name) == 0) {

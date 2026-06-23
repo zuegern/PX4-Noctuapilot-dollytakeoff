@@ -100,6 +100,8 @@ public:
 
 	bool goodDisconnectDetected() const { return good_disconnect_detected_; }
 
+	void abort();
+
 	bool wheelSteeringEnabled() const;
 
 	bool directWheelSteeringEnabled() const;
@@ -192,7 +194,6 @@ private:
 		(ParamFloat<px4::params::TROLLEY_ROT_ASPD>) param_trolley_rot_airspd_,
 		(ParamFloat<px4::params::TROLLEY_ROT_GSPD>) param_trolley_rot_gspd_,
 		(ParamFloat<px4::params::TROLLEY_TK_TIME>) param_trolley_tk_time_,
-		(ParamFloat<px4::params::TROLLEY_ROT_TIME>) param_trolley_rot_time_,
 		(ParamInt<px4::params::TROLLEY_STR_MODE>) param_trolley_str_mode_,
 		(ParamInt<px4::params::TROLLEY_PATH>) param_trolley_path_,
 		(ParamFloat<px4::params::TROLLEY_RADIUS>) param_trolley_radius_,

@@ -253,6 +253,11 @@ private:
 		TAKEOFF_METHOD_TROLLEY = 3
 	};
 
+	enum TrolleyServoControl {
+		TROLLEY_SERVO_CONTROL_DIRECT = 0,
+		TROLLEY_SERVO_CONTROL_ARDUINO = 1
+	};
+
 	bool runwayTakeoffEnabled() const;
 	bool launchDetectionTakeoffEnabled() const;
 	bool trolleyTakeoffEnabled() const;
@@ -644,6 +649,11 @@ private:
 	void publishTrolleyTakeoffAbortSetpoints(const hrt_abstime &now);
 
 	/**
+	 * @brief Sends one safe center/abort command before leaving trolley takeoff.
+	 */
+	void sendTrolleyTakeoffExitCommand(const hrt_abstime &now);
+
+	/**
 	 * @brief Controls automatic landing with straight approach.
 	 *
 	 * To be used in Missions that contain a loiter down followed by a land waypoint.
@@ -936,7 +946,7 @@ private:
 		// Takeoff method parameters
 		(ParamInt<px4::params::FW_TKOFF_METHOD>) _param_fw_tkoff_method,
 		(ParamFloat<px4::params::FW_LAUN_CS_LK_DY>) _param_fw_laun_cs_lk_dy,
-		(ParamBool<px4::params::TROLLEY_COM_EN>) _param_trolley_com_en,
+		(ParamInt<px4::params::TROLLEY_SRV_CTL>) _param_trolley_servo_ctl,
 		(ParamInt<px4::params::TROLLEY_COM_PORT>) _param_trolley_com_port,
 		(ParamInt<px4::params::TROLLEY_COM_BAUD>) _param_trolley_com_baud,
 		(ParamFloat<px4::params::TROLLEY_COM_LOSS>) _param_trolley_com_loss,
