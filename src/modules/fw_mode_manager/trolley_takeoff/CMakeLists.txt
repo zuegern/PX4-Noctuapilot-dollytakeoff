@@ -31,7 +31,16 @@
 #
 ############################################################################
 
+px4_add_library(trolley_control
+	TrolleyControl.cpp
+)
+target_include_directories(trolley_control PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+
 px4_add_library(trolley_takeoff
 	TrolleyTakeoff.cpp
 )
+target_link_libraries(trolley_takeoff PUBLIC trolley_control)
+
+px4_add_unit_gtest(SRC TrolleyControlTest.cpp LINKLIBS trolley_control)
+
 set_property(GLOBAL APPEND PROPERTY PX4_MODULE_CONFIG_FILES ${CMAKE_CURRENT_SOURCE_DIR}/trolley_takeoff_params.yaml)

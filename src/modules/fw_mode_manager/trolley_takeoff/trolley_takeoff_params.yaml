@@ -18,7 +18,7 @@ parameters:
         long: |-
           Pitch setpoint before trolley release or takeoff rotation airspeed is reached.
 
-          This setpoint is only used while the aircraft is physically attached to the trolley. Once trolley takeoff enters climbout, PX4 immediately uses the normal fixed-wing climbout pitch limits.
+          This setpoint is only used while the aircraft is physically attached to the trolley. Once trolley takeoff enters climbout, PX4 transitions to the normal fixed-wing climbout pitch limits over TROLLEY_ROT_TIME.
       type: float
       default: 0.0
       unit: deg
@@ -100,6 +100,18 @@ parameters:
       max: 120.0
       decimal: 1
       increment: 0.5
+    TROLLEY_ROT_TIME:
+      description:
+        short: Trolley takeoff rotation time
+        long: |-
+          Time used to linearly transition from the attached trolley pitch constraint to the normal fixed-wing climbout pitch constraints after release.
+      type: float
+      default: 1.0
+      unit: s
+      min: 0.1
+      max: 10.0
+      decimal: 1
+      increment: 0.1
     TROLLEY_STR_MODE:
       description:
         short: Trolley steering mode
@@ -107,7 +119,8 @@ parameters:
           Selects how the trolley wheel steering command is generated during trolley takeoff.
 
           Heading hold is the default runway-style behavior and uses the existing fixed-wing wheel controller to hold the initial heading.
-          Closed-loop path tracking uses the local position estimate and PX4 path guidance to follow the selected straight or constant-radius trolley path.
+          Closed-loop path tracking uses the local position and heading estimate, curvature feedforward, and heading/cross-track feedback to follow the selected straight or constant-radius trolley path.
+          Closed-loop path tracking aborts before release if position, horizontal velocity, or heading becomes invalid, the cross-track limit is exceeded, or a configured lateral-acceleration limit makes the requested path infeasible.
           Open-loop path directly commands the selected straight or constant-radius trolley path and is intended for no-GPS steering tests.
       type: enum
       values:
@@ -162,11 +175,13 @@ parameters:
         long: |-
           Forward distance from the rear axle to the PX4 position reference point on the trolley centerline.
 
-          Set this if the IMU/GPS/UAV reference is not above the rear axle. Left/right wheel radius differences are not configured here because the reference point is assumed to be centered laterally.
+          Set this if the IMU/GPS/UAV reference is ahead of the rear axle. Left/right wheel radius differences are not configured here because the reference point is assumed to be centered laterally.
+
+          Closed-loop path tracking implements a published sufficient stability condition for reference points at or ahead of the rear axle, so negative offsets are not supported.
       type: float
       default: 0.0
       unit: m
-      min: -5.0
+      min: 0.0
       max: 20.0
       decimal: 3
       increment: 0.01
@@ -186,21 +201,62 @@ parameters:
       increment: 0.5
     TROLLEY_TRK_GAIN:
       description:
-        short: Trolley path tracking steering gain
+        short: Trolley path heading feedback gain
         long: |-
-          Converts closed-loop path tracking course error into a normalized trolley steering command.
+          Positive magnitude of the heading-error feedback used by closed-loop trolley path tracking.
 
-          Start with a low value and increase carefully during low-speed tests. This only applies when TROLLEY_STR_MODE is set to closed-loop path tracking.
+          The controller applies the negative feedback sign internally. It must be greater than zero in closed-loop mode. Start with a low positive value and increase carefully during low-speed tests. This only applies when TROLLEY_STR_MODE is set to closed-loop path tracking.
       type: float
       default: 1.0
       min: 0.0
       max: 5.0
       decimal: 2
       increment: 0.1
+    TROLLEY_XTK_GAIN:
+      description:
+        short: Trolley cross-track feedback gain
+        long: |-
+          Converts signed cross-track error into a bounded heading correction for closed-loop trolley path tracking.
+
+          This gain has units of inverse metres. It must be greater than the sufficient constant-curvature stability threshold calculated from TROLLEY_WB, TROLLEY_REF_X, and TROLLEY_STR_MAX. PX4 aborts before release if the condition is not met. Start low and tune together with TROLLEY_TRK_GAIN during low-speed tests.
+      type: float
+      default: 0.5
+      min: 0.0
+      max: 10.0
+      decimal: 2
+      increment: 0.05
+    TROLLEY_LAT_ACC:
+      description:
+        short: Trolley maximum lateral acceleration
+        long: |-
+          Optional lateral-acceleration limit for trolley steering.
+
+          When greater than zero, the steering-angle limit decreases with the estimated body-longitudinal speed to limit acceleration at the rear axle center. Closed-loop takeoff aborts before release if the selected constant-radius path cannot satisfy this limit. Set to a negative value to disable until a safe trolley-specific limit has been measured.
+      type: float
+      default: -1.0
+      unit: m/s^2
+      min: -1.0
+      max: 20.0
+      decimal: 2
+      increment: 0.1
+    TROLLEY_XTK_MAX:
+      description:
+        short: Trolley maximum cross-track error
+        long: |-
+          Maximum absolute path deviation allowed during closed-loop trolley ground roll.
+
+          Exceeding this limit before release aborts trolley takeoff. Set to zero to disable this guard only during controlled low-speed development tests.
+      type: float
+      default: 2.0
+      unit: m
+      min: 0.0
+      max: 20.0
+      decimal: 2
+      increment: 0.1
     TROLLEY_STR_RATE:
       description:
         short: Trolley steering command slew rate
-        long: Limits how quickly the direct trolley steering command can change. Set to -1 to disable.
+        long: Limits how quickly the direct trolley steering command can change. Set to 0 or a negative value to disable.
       type: float
       default: 1.0
       min: -1.0
@@ -228,7 +284,7 @@ parameters:
           Selects how trolley steering servos are controlled during trolley takeoff.
 
           Direct Pixhawk PWM uses the fixed-wing wheel steering output, so assign the trolley steering servos to Landing Gear Wheel outputs in QGroundControl. This is the same direct-servo setup used before the Raspberry Pi Pico helper.
-          Raspberry Pi Pico serial sends the trolley steering command to the Pico and uses Pico status packets as the trolley connection monitor. If the serial link is lost before trolley release, trolley takeoff aborts. If the link is lost after release, it is treated as the expected disconnect.
+          Raspberry Pi Pico serial sends the trolley steering command to the Pico and uses bidirectional command/status heartbeats as the trolley connection monitor. If either serial direction is lost before trolley release, trolley takeoff aborts. If the link is lost after release, it is treated as the expected disconnect.
       type: enum
       values:
         0: Direct Pixhawk PWM

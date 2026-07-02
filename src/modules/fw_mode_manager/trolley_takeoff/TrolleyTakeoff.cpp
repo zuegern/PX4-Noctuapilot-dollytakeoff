@@ -109,7 +109,6 @@ namespace trolleytakeoff
 					takeoff_time_ = time_now;
 					takeoff_state_ = TrolleyTakeoffState::CLIMBOUT;
 					release_authorized_ = true;
-					wheel_steering_setpoint_ = 0.f;
 					events::send(events::ID("trolley_takeoff_release"), events::Log::Info,
 						     "Trolley takeoff release condition reached, climbout");
 				}
@@ -145,7 +144,8 @@ namespace trolleytakeoff
 
 		return takeoff_state_ == TrolleyTakeoffState::CLIMBOUT
 		       && takeoff_time_ != 0
-		       && hrt_elapsed_time(&takeoff_time_) < (param_trolley_str_hold_.get() * 1_s);
+		       && (hrt_elapsed_time(&takeoff_time_) < (param_trolley_str_hold_.get() * 1_s)
+			   || fabsf(wheel_steering_setpoint_) > 0.01f);
 	}
 
 	void TrolleyTakeoff::abort()
@@ -266,7 +266,7 @@ namespace trolleytakeoff
 
 		const float slew_rate = param_trolley_str_rate_.get();
 
-		if (slew_rate < 0.f)
+		if (slew_rate <= FLT_EPSILON)
 		{
 			wheel_steering_setpoint_ = steering_setpoint;
 
@@ -283,7 +283,19 @@ namespace trolleytakeoff
 		time_last_steering_update_ = time_now;
 	}
 
-	float TrolleyTakeoff::openLoopWheelSteeringSetpoint() const
+	TrolleyControlConfig TrolleyTakeoff::controlConfig() const
+	{
+		return {
+			.wheelbase = param_trolley_wheelbase_.get(),
+			.reference_offset = param_trolley_ref_x_.get(),
+			.max_steering_angle = math::radians(param_trolley_str_max_.get()),
+			.heading_gain = param_trolley_trk_gain_.get(),
+			.cross_track_gain = param_trolley_xtk_gain_.get(),
+			.max_lateral_acceleration = param_trolley_lat_acc_.get(),
+		};
+	}
+
+	float TrolleyTakeoff::openLoopWheelSteeringSetpoint(const float longitudinal_speed) const
 	{
 		if (isAborted() || takeoff_state_ >= TrolleyTakeoffState::CLIMBOUT)
 		{
@@ -302,34 +314,33 @@ namespace trolleytakeoff
 			return 0.f;
 		}
 
-		const float wheelbase = param_trolley_wheelbase_.get();
-		const float rear_axle_radius = rearAxleTurnRadius(effectivePathRadius());
-		const float max_steering_angle = math::radians(param_trolley_str_max_.get());
+		const float reference_radius = effectivePathRadius();
+		const float direction = (path_type == TrolleyPathType::PATH_CONSTANT_RIGHT) ? 1.f : -1.f;
+		const float curvature = direction / reference_radius;
+		const float offset_curvature = param_trolley_ref_x_.get() * curvature;
 
-		if (wheelbase <= FLT_EPSILON || rear_axle_radius <= FLT_EPSILON || max_steering_angle <= FLT_EPSILON)
+		if (!PX4_ISFINITE(curvature) || fabsf(offset_curvature) >= 1.f)
 		{
 			return 0.f;
 		}
 
-		const float steering_angle = atanf(wheelbase / rear_axle_radius);
-		const float direction = (path_type == TrolleyPathType::PATH_CONSTANT_RIGHT) ? 1.f : -1.f;
+		TrolleyPathState path_state{};
+		path_state.heading = 0.f;
+		path_state.error = 0.f;
+		path_state.curvature = curvature;
+		path_state.valid = true;
 
-		return math::constrain(direction * steering_angle / max_steering_angle, -1.f, 1.f);
+		const float desired_yaw = -asinf(offset_curvature);
+		const float speed = PX4_ISFINITE(longitudinal_speed) ? fabsf(longitudinal_speed) : 0.f;
+		const TrolleyControlOutput output = calculateTrolleyControl(path_state, desired_yaw, speed, controlConfig());
+
+		return output.valid ? output.normalized_steering : 0.f;
 	}
 
-	float TrolleyTakeoff::pathTrackingWheelSteeringSetpoint(const float course_setpoint, const float yaw) const
+	TrolleyControlOutput TrolleyTakeoff::pathTrackingWheelSteeringSetpoint(const TrolleyPathState &path_state,
+			const float yaw, const float longitudinal_speed) const
 	{
-		const float max_steering_angle = math::radians(param_trolley_str_max_.get());
-
-		if (!PX4_ISFINITE(course_setpoint) || !PX4_ISFINITE(yaw) || max_steering_angle <= FLT_EPSILON)
-		{
-			return 0.f;
-		}
-
-		const float course_error = matrix::wrap_pi(course_setpoint - yaw);
-		const float steering_angle = param_trolley_trk_gain_.get() * course_error;
-
-		return math::constrain(steering_angle / max_steering_angle, -1.f, 1.f);
+		return calculateTrolleyControl(path_state, yaw, longitudinal_speed, controlConfig());
 	}
 
 	float TrolleyTakeoff::rotationAirspeedThreshold(const float takeoff_airspeed) const
@@ -427,7 +438,9 @@ namespace trolleytakeoff
 
 		else if (takeoff_state_ < TrolleyTakeoffState::FLYING)
 		{
-			return min_pitch_in_climbout;
+			const float trolley_pitch_min = math::radians(param_trolley_psp_.get() - 0.01f);
+			return interpolateValuesOverAbsoluteTime(trolley_pitch_min, min_pitch_in_climbout, takeoff_time_,
+					param_trolley_rot_time_.get());
 
 		}
 
@@ -447,7 +460,9 @@ namespace trolleytakeoff
 
 		else if (takeoff_state_ < TrolleyTakeoffState::FLYING)
 		{
-			return max_pitch;
+			const float trolley_pitch_max = math::radians(param_trolley_psp_.get() + 0.01f);
+			return interpolateValuesOverAbsoluteTime(trolley_pitch_max, max_pitch, takeoff_time_,
+					param_trolley_rot_time_.get());
 
 		}
 

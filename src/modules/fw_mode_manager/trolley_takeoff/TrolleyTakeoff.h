@@ -38,6 +38,8 @@
 #ifndef TROLLEYTAKEOFF_H
 #define TROLLEYTAKEOFF_H
 
+#include "TrolleyControl.h"
+
 #include <drivers/drv_hrt.h>
 #include <mathlib/mathlib.h>
 #include <matrix/math.hpp>
@@ -88,6 +90,8 @@ public:
 
 	bool isInitialized() const { return initialized_; }
 
+	hrt_abstime initializedTime() const { return time_initialized_; }
+
 	bool wheelNudgingEnabled() const { return param_trolley_nudge_.get() && takeoff_state_ < TrolleyTakeoffState::CLIMBOUT; }
 
 	bool linkHealthy() const { return trolley_link_healthy_; }
@@ -116,9 +120,14 @@ public:
 
 	void updateWheelSteeringSetpoint(const hrt_abstime &time_now, const float target_setpoint);
 
-	float openLoopWheelSteeringSetpoint() const;
+	float openLoopWheelSteeringSetpoint(const float longitudinal_speed) const;
 
-	float pathTrackingWheelSteeringSetpoint(const float course_setpoint, const float yaw) const;
+	TrolleyControlOutput pathTrackingWheelSteeringSetpoint(const TrolleyPathState &path_state, const float yaw,
+			const float longitudinal_speed) const;
+
+	float maximumPathError() const { return param_trolley_xtk_max_.get(); }
+
+	int32_t steeringMode() const { return param_trolley_str_mode_.get(); }
 
 	int32_t pathType() const { return param_trolley_path_.get(); }
 
@@ -132,6 +141,8 @@ public:
 
 	// Converts reference-point path radius to rear-axle centerline radius for bicycle steering geometry.
 	float rearAxleTurnRadius(const float reference_radius) const;
+
+	TrolleyControlConfig controlConfig() const;
 
 	float getPitch() const;
 
@@ -194,6 +205,7 @@ private:
 		(ParamFloat<px4::params::TROLLEY_ROT_ASPD>) param_trolley_rot_airspd_,
 		(ParamFloat<px4::params::TROLLEY_ROT_GSPD>) param_trolley_rot_gspd_,
 		(ParamFloat<px4::params::TROLLEY_TK_TIME>) param_trolley_tk_time_,
+		(ParamFloat<px4::params::TROLLEY_ROT_TIME>) param_trolley_rot_time_,
 		(ParamInt<px4::params::TROLLEY_STR_MODE>) param_trolley_str_mode_,
 		(ParamInt<px4::params::TROLLEY_PATH>) param_trolley_path_,
 		(ParamFloat<px4::params::TROLLEY_RADIUS>) param_trolley_radius_,
@@ -201,6 +213,9 @@ private:
 		(ParamFloat<px4::params::TROLLEY_REF_X>) param_trolley_ref_x_,
 		(ParamFloat<px4::params::TROLLEY_STR_MAX>) param_trolley_str_max_,
 		(ParamFloat<px4::params::TROLLEY_TRK_GAIN>) param_trolley_trk_gain_,
+		(ParamFloat<px4::params::TROLLEY_XTK_GAIN>) param_trolley_xtk_gain_,
+		(ParamFloat<px4::params::TROLLEY_LAT_ACC>) param_trolley_lat_acc_,
+		(ParamFloat<px4::params::TROLLEY_XTK_MAX>) param_trolley_xtk_max_,
 		(ParamFloat<px4::params::TROLLEY_STR_RATE>) param_trolley_str_rate_,
 		(ParamFloat<px4::params::TROLLEY_STR_HOLD>) param_trolley_str_hold_
 	)

@@ -68,11 +68,13 @@
 #include <uORB/Subscription.hpp>
 #include <uORB/SubscriptionCallback.hpp>
 #include <uORB/topics/airspeed_validated.h>
+#include <uORB/topics/debug_array.h>
 #include <uORB/topics/fixed_wing_lateral_setpoint.h>
 #include <uORB/topics/fixed_wing_lateral_guidance_status.h>
 #include <uORB/topics/fixed_wing_longitudinal_setpoint.h>
 #include <uORB/topics/fixed_wing_runway_control.h>
 #include <uORB/topics/landing_gear.h>
+#include <uORB/topics/landing_gear_wheel.h>
 #include <uORB/topics/launch_detection_status.h>
 #include <uORB/topics/normalized_unsigned_setpoint.h>
 #include <uORB/topics/parameter_update.h>
@@ -192,6 +194,7 @@ private:
 	uORB::Subscription _vehicle_command_sub{ORB_ID(vehicle_command)};
 	uORB::Subscription _vehicle_land_detected_sub{ORB_ID(vehicle_land_detected)};
 	uORB::Subscription _vehicle_status_sub{ORB_ID(vehicle_status)};
+	uORB::Subscription _landing_gear_wheel_sub{ORB_ID(landing_gear_wheel)};
 
 	uORB::Publication<vehicle_local_position_setpoint_s> _local_pos_sp_pub{ORB_ID(vehicle_local_position_setpoint)};
 	uORB::Publication<position_controller_landing_status_s>	_pos_ctrl_landing_status_pub{ORB_ID(position_controller_landing_status)};
@@ -204,6 +207,7 @@ private:
 	uORB::PublicationData<fixed_wing_longitudinal_setpoint_s> _longitudinal_ctrl_sp_pub{ORB_ID(fixed_wing_longitudinal_setpoint)};
 	uORB::Publication<fixed_wing_lateral_guidance_status_s> _fixed_wing_lateral_guidance_status_pub{ORB_ID(fixed_wing_lateral_guidance_status)};
 	uORB::Publication<fixed_wing_runway_control_s> _fixed_wing_runway_control_pub{ORB_ID(fixed_wing_runway_control)};
+	uORB::Publication<debug_array_s> _trolley_debug_pub{ORB_ID(debug_array)};
 
 	position_setpoint_triplet_s _pos_sp_triplet{};
 	vehicle_control_mode_s _control_mode{};
@@ -255,7 +259,7 @@ private:
 
 	enum TrolleyServoControl {
 		TROLLEY_SERVO_CONTROL_DIRECT = 0,
-		TROLLEY_SERVO_CONTROL_ARDUINO = 1
+		TROLLEY_SERVO_CONTROL_PICO = 1
 	};
 
 	bool runwayTakeoffEnabled() const;
@@ -339,9 +343,19 @@ private:
 		TROLLEY_SERIAL_FLAG_CENTER_WHEELS = (1 << 3)
 	};
 
+	enum TrolleySerialStatusFlags : uint8_t {
+		TROLLEY_SERIAL_STATUS_OK = (1 << 0),
+		TROLLEY_SERIAL_STATUS_COMMAND_FRESH = (1 << 1),
+		TROLLEY_SERIAL_STATUS_FAILSAFE_CENTERING = (1 << 2)
+	};
+
 	static constexpr uint8_t TROLLEY_SERIAL_VERSION = 1;
 	static constexpr uint8_t TROLLEY_SERIAL_COMMAND_LEN = 13;
 	static constexpr uint8_t TROLLEY_SERIAL_STATUS_LEN = 8;
+	static constexpr uint8_t TROLLEY_SERIAL_MAX_SEQUENCE_LAG = 3;
+	static constexpr uint16_t TROLLEY_DEBUG_ID = 4242;
+	static constexpr hrt_abstime TROLLEY_DEBUG_INTERVAL = 100_ms;
+	static constexpr hrt_abstime TROLLEY_HEADING_OUTPUT_TIMEOUT = 100_ms;
 
 	int _trolley_serial_fd{-1};
 	uint8_t _trolley_serial_tx_seq{0};
@@ -350,6 +364,10 @@ private:
 	hrt_abstime _trolley_serial_last_rx{0};
 	hrt_abstime _trolley_serial_last_open_attempt{0};
 	bool _trolley_serial_seen_status{false};
+	bool _trolley_serial_status_healthy{false};
+	landing_gear_wheel_s _trolley_heading_wheel_output{};
+	hrt_abstime _last_trolley_debug_publish{0};
+	Vector2f _trolley_debug_start_pos_local{NAN, NAN};
 
 	bool _skipping_takeoff_detection{false};
 
@@ -642,11 +660,27 @@ private:
 	void parseTrolleySerialByte(const uint8_t byte, const hrt_abstime now);
 	void sendTrolleySerialCommand(const hrt_abstime now, const float steering_setpoint);
 	uint8_t trolleySerialChecksum(const uint8_t *buffer, const uint8_t length) const;
+	float trolleyHeadingWheelSetpoint(const hrt_abstime now);
+	bool trolleyPathTrackingNavigationValid() const;
+	void abortTrolleyTakeoffForInvalidNavigation();
+	trolleytakeoff::TrolleyPathState trolleyPathState(const Vector2f &start_pos_local, const float takeoff_bearing,
+			const Vector2f &vehicle_pos) const;
+	void abortTrolleyTakeoffForPathTracking(const trolleytakeoff::TrolleyPathState &path_state,
+						const trolleytakeoff::TrolleyControlOutput &control_output);
+	void publishTrolleyDebug(const hrt_abstime now, const Vector2f &start_pos_local, const float takeoff_bearing,
+				 const Vector2f &vehicle_pos, const Vector2f &ground_vel,
+				 const DirectionalGuidanceOutput &guidance, const float raw_wheel_setpoint,
+				 const float yaw_nudge, const bool navigation_available,
+				 const bool trolley_link_required, const bool trolley_link_healthy,
+				 const trolleytakeoff::TrolleyPathState &path_state,
+				 const trolleytakeoff::TrolleyControlOutput &control_output);
 
 	/**
 	 * @brief Publishes conservative control setpoints after a bad trolley disconnect.
 	 */
 	void publishTrolleyTakeoffAbortSetpoints(const hrt_abstime &now);
+
+	void publishTrolleyWheelCenterSetpoint(const hrt_abstime &now);
 
 	/**
 	 * @brief Sends one safe center/abort command before leaving trolley takeoff.
@@ -853,7 +887,8 @@ private:
 	 * @param[in] ground_vel Vehicle ground velocity vector [m/s]
 	 */
 	DirectionalGuidanceOutput navigateTrolleyPath(const Vector2f &start_pos_local, const float takeoff_bearing,
-			const Vector2f &vehicle_pos, const Vector2f &ground_vel);
+			const Vector2f &vehicle_pos, const Vector2f &ground_vel,
+			const trolleytakeoff::TrolleyPathState &path_state);
 
 	/*
 	 * Loitering (unlimited) logic. Takes loiter center, radius, and direction and

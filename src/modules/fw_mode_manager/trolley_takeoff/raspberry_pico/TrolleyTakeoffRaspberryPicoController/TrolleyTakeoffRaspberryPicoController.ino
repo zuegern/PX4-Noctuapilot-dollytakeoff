@@ -30,10 +30,6 @@ static constexpr uint32_t kStatusPeriodMs = 20;
 static constexpr float kCommandSlewPerSecond = 3.0f;
 static constexpr float kFailsafeCenterSlewPerSecond = 0.8f;
 
-// Raspberry Pi Pico H UART0 pins for the Pixhawk link.
-static constexpr int kPixhawkTxPin = 0; // Pico GP0 / UART0 TX -> Pixhawk RX
-static constexpr int kPixhawkRxPin = 1; // Pico GP1 / UART0 RX <- Pixhawk TX
-
 // Servo signal pins on the Raspberry Pi Pico H.
 static constexpr int kLeftServoPin = 14;  // Pico GP14
 static constexpr int kRightServoPin = 15; // Pico GP15
@@ -48,6 +44,11 @@ static constexpr int kRightMinUs = 1100;
 static constexpr int kRightCenterUs = 1500;
 static constexpr int kRightMaxUs = 1900;
 static constexpr bool kRightReversed = false;
+
+static_assert(kLeftMinUs < kLeftCenterUs && kLeftCenterUs < kLeftMaxUs,
+	      "Left servo calibration must satisfy min < center < max");
+static_assert(kRightMinUs < kRightCenterUs && kRightCenterUs < kRightMaxUs,
+	      "Right servo calibration must satisfy min < center < max");
 
 Servo left_servo;
 Servo right_servo;
@@ -135,7 +136,8 @@ void handleCommandPacket()
 
 	const uint8_t flags = rx_buffer[5];
 	const int16_t steering_scaled = static_cast<int16_t>(rx_buffer[6] | (rx_buffer[7] << 8));
-	center_requested_by_px4 = (flags & (kFlagAbort | kFlagCenterWheels | kFlagReleased)) != 0;
+	const bool active = (flags & kFlagActive) != 0;
+	center_requested_by_px4 = !active || (flags & (kFlagAbort | kFlagCenterWheels | kFlagReleased)) != 0;
 
 	last_command_sequence = rx_buffer[3];
 	last_command_ms = millis();
@@ -158,7 +160,7 @@ void parseByte(const uint8_t byte)
 
 	if (rx_index >= kCommandPacketLength) {
 		handleCommandPacket();
-		rx_index = 0;
+		rx_index = (byte == 'T') ? 1 : 0;
 	}
 }
 
@@ -181,10 +183,7 @@ void setup()
 {
 	Serial.begin(115200);
 
-#if defined(ARDUINO_ARCH_RP2040)
-	PixhawkSerial.setTX(kPixhawkTxPin);
-	PixhawkSerial.setRX(kPixhawkRxPin);
-#endif
+	// Serial1 uses the Pico's standard UART0 mapping: GP0 TX and GP1 RX.
 	PixhawkSerial.begin(115200);
 
 	left_servo.attach(kLeftServoPin);
@@ -201,8 +200,12 @@ void loop()
 	}
 
 	const uint32_t now_ms = millis();
-	const float dt = (now_ms - last_update_ms) * 0.001f;
+	float dt = (now_ms - last_update_ms) * 0.001f;
 	last_update_ms = now_ms;
+
+	if (dt > 0.1f) {
+		dt = 0.1f;
+	}
 
 	const bool command_fresh = have_command && (now_ms - last_command_ms) <= kCommandTimeoutMs;
 	const bool failsafe_centering = !command_fresh;
