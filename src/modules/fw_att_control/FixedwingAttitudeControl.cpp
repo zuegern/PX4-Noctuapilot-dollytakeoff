@@ -401,12 +401,24 @@ void FixedwingAttitudeControl::Run()
 
 				}
 
-				// set now yaw setpoint once we're entering the first time
-				if (!PX4_ISFINITE(_steering_wheel_yaw_setpoint)) {
+				float yaw_rate_feedforward = 0.f;
+
+				if (runway_control.wheel_yaw_control_external) {
+					if (PX4_ISFINITE(runway_control.wheel_yaw_setpoint)
+					    && PX4_ISFINITE(runway_control.wheel_yaw_rate_feedforward)) {
+						_steering_wheel_yaw_setpoint = matrix::wrap_pi(runway_control.wheel_yaw_setpoint);
+						yaw_rate_feedforward = runway_control.wheel_yaw_rate_feedforward;
+
+					} else {
+						_steering_wheel_yaw_setpoint = euler_angles.psi();
+					}
+
+				} else if (!PX4_ISFINITE(_steering_wheel_yaw_setpoint)) {
+					// Latch the entry heading for the existing runway and trolley heading-hold modes.
 					_steering_wheel_yaw_setpoint = euler_angles.psi();
 				}
 
-				_wheel_ctrl.control_attitude(_steering_wheel_yaw_setpoint, euler_angles.psi());
+				_wheel_ctrl.control_attitude(_steering_wheel_yaw_setpoint, euler_angles.psi(), yaw_rate_feedforward);
 
 				vehicle_angular_velocity_s angular_velocity{};
 				_vehicle_rates_sub.copy(&angular_velocity);

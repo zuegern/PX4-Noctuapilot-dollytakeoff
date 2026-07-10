@@ -45,6 +45,7 @@ set(POSCONTROL_DEPENDENCIES
 	motion_planning
 	performance_model
 	Sticks
+	drivers__device
 )
 
 if(CONFIG_FIGURE_OF_EIGHT)

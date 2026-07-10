@@ -65,6 +65,8 @@ struct TrolleyControlOutput {
 	float steering_limit{NAN};
 	float heading_error{NAN};
 	float desired_yaw_offset{NAN};
+	float desired_yaw{NAN};
+	float yaw_rate_feedforward{NAN};
 	float minimum_cross_track_gain{NAN};
 	bool path_feasible{false};
 	bool stability_condition_met{false};

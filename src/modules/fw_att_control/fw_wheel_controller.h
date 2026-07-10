@@ -49,9 +49,10 @@ public:
 	 *
 	 * @param yaw_setpoint yaw setpoint [rad]
 	 * @param yaw estimated yaw [rad]
+	 * @param yaw_rate_feedforward yaw-rate feedforward [rad/s]
 	 * @return Wheel body rate setpoint [rad/s]
 	 */
-	float control_attitude(float yaw_setpoint, float yaw);
+	float control_attitude(float yaw_setpoint, float yaw, float yaw_rate_feedforward = 0.f);
 
 	float control_bodyrate(float dt, float body_z_rate, float groundspeed, float groundspeed_scaler);
 

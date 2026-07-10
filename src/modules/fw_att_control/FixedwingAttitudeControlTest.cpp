@@ -33,6 +33,7 @@
 
 #include <gtest/gtest.h>
 #include "FixedwingAttitudeControl.hpp"
+#include "fw_wheel_controller.h"
 
 using namespace matrix;
 
@@ -113,4 +114,25 @@ TEST(FixedwingAttitudeControlTest, YawRateSetpointZeroBeforeTurnCoord_BankedTurn
 	const float yaw_rate = computeYawRateSetpointBeforeTurnCoord(q_current, q_sp);
 
 	EXPECT_NEAR(yaw_rate, 0.f, 1e-4f);
+}
+
+TEST(WheelControllerTest, ExistingHeadingControlIsUnchanged)
+{
+	WheelController controller;
+	controller.set_time_constant(0.1f);
+	controller.set_max_rate(10.f);
+
+	EXPECT_NEAR(controller.control_attitude(0.1f, 0.f), 1.f, 1.e-6f);
+}
+
+TEST(WheelControllerTest, AddsYawRateFeedforwardBeforeRateLimit)
+{
+	WheelController controller;
+	controller.set_time_constant(0.1f);
+	controller.set_max_rate(10.f);
+
+	EXPECT_NEAR(controller.control_attitude(0.1f, 0.f, 0.35f), 1.35f, 1.e-6f);
+
+	controller.set_max_rate(1.f);
+	EXPECT_NEAR(controller.control_attitude(0.1f, 0.f, 0.35f), 1.f, 1.e-6f);
 }

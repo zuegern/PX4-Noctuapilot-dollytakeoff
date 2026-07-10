@@ -16,3 +16,7 @@ float32 wheel_steering_nudging_rate	# [norm] [@range -1, 1] [FRD] Manual wheel n
 
 bool wheel_steering_direct		# Use wheel_steering_setpoint directly instead of heading/rate wheel controller.
 float32 wheel_steering_setpoint		# [norm] [@range -1, 1] Direct wheel steering command. NAN is interpreted as 0.
+
+bool wheel_yaw_control_external		# Use the externally supplied wheel yaw and yaw-rate references.
+float32 wheel_yaw_setpoint		# [rad] [@range -pi, pi] External wheel yaw setpoint.
+float32 wheel_yaw_rate_feedforward	# [rad/s] External wheel yaw-rate feedforward.

@@ -49,7 +49,8 @@ namespace trolleytakeoff
 {
 
 enum TrolleyTakeoffState {
-	THROTTLE_RAMP = 0, // ramping up throttle while attached to the trolley
+	ALIGN_TO_PATH = 0, // taxi at low throttle and steer until the trolley points along the path
+	THROTTLE_RAMP, // ramping up throttle while attached to the trolley
 	CLAMPED_TO_TROLLEY, // constrained on trolley, steering with wheel control
 	CLIMBOUT, // after release/liftoff, climb to clearance altitude
 	FLYING, // navigate freely
@@ -71,7 +72,8 @@ enum TrolleyTakeoffCondition {
 enum TrolleySteeringMode {
 	STEERING_HEADING = 0,
 	STEERING_PATH_TRACKING = 1,
-	STEERING_OPEN_LOOP = 2
+	STEERING_OPEN_LOOP = 2,
+	STEERING_PATH_HEADING = 3
 };
 
 class __EXPORT TrolleyTakeoff : public ModuleParams
@@ -84,11 +86,13 @@ public:
 
 	void update(const hrt_abstime &time_now, const float takeoff_airspeed, const float calibrated_airspeed,
 		    const float estimated_ground_speed, const float vehicle_altitude, const float clearance_altitude,
-		    const bool trolley_link_required, const bool trolley_link_healthy);
+		    const float path_heading_error, const bool trolley_link_required, const bool trolley_link_healthy);
 
 	TrolleyTakeoffState getState() const { return takeoff_state_; }
 
 	bool isInitialized() const { return initialized_; }
+
+	bool isAligningToPath() const { return takeoff_state_ == TrolleyTakeoffState::ALIGN_TO_PATH; }
 
 	hrt_abstime initializedTime() const { return time_initialized_; }
 
@@ -116,6 +120,14 @@ public:
 
 	bool openLoopSteeringEnabled() const;
 
+	bool pathHeadingSteeringEnabled() const;
+
+	bool wheelControllerSteeringEnabled() const;
+
+	bool navigationSteeringEnabled() const;
+
+	bool wheelControllerConfigured() const { return param_fw_w_en_.get(); }
+
 	float wheelSteeringSetpoint() const { return wheel_steering_setpoint_; }
 
 	void updateWheelSteeringSetpoint(const hrt_abstime &time_now, const float target_setpoint);
@@ -126,6 +138,8 @@ public:
 			const float longitudinal_speed) const;
 
 	float maximumPathError() const { return param_trolley_xtk_max_.get(); }
+
+	float maximumWheelYawRate() const { return math::radians(param_fw_w_rmax_.get()); }
 
 	int32_t steeringMode() const { return param_trolley_str_mode_.get(); }
 
@@ -145,8 +159,6 @@ public:
 	TrolleyControlConfig controlConfig() const;
 
 	float getPitch() const;
-
-	float getRoll() const;
 
 	float getThrottle(const float idle_throttle) const;
 
@@ -194,9 +206,18 @@ private:
 
 	hrt_abstime takeoff_time_{0};
 
+	hrt_abstime ramp_start_time_{0};
+
 	hrt_abstime time_last_steering_update_{0};
 
+	hrt_abstime release_condition_met_since_{0};
+
+	hrt_abstime align_condition_met_since_{0};
+
 	DEFINE_PARAMETERS(
+		(ParamFloat<px4::params::TROLLEY_ALN_THR>) param_trolley_aln_thr_,
+		(ParamFloat<px4::params::TROLLEY_ALN_ERR>) param_trolley_aln_err_,
+		(ParamFloat<px4::params::TROLLEY_ALN_TO>) param_trolley_aln_to_,
 		(ParamFloat<px4::params::TROLLEY_MAX_THR>) param_trolley_max_thr_,
 		(ParamFloat<px4::params::TROLLEY_PSP>) param_trolley_psp_,
 		(ParamFloat<px4::params::TROLLEY_RAMP_TM>) param_trolley_ramp_time_,
@@ -204,6 +225,7 @@ private:
 		(ParamInt<px4::params::TROLLEY_TK_COND>) param_trolley_tk_cond_,
 		(ParamFloat<px4::params::TROLLEY_ROT_ASPD>) param_trolley_rot_airspd_,
 		(ParamFloat<px4::params::TROLLEY_ROT_GSPD>) param_trolley_rot_gspd_,
+		(ParamFloat<px4::params::TROLLEY_RLS_HOLD>) param_trolley_rls_hold_,
 		(ParamFloat<px4::params::TROLLEY_TK_TIME>) param_trolley_tk_time_,
 		(ParamFloat<px4::params::TROLLEY_ROT_TIME>) param_trolley_rot_time_,
 		(ParamInt<px4::params::TROLLEY_STR_MODE>) param_trolley_str_mode_,
@@ -217,7 +239,9 @@ private:
 		(ParamFloat<px4::params::TROLLEY_LAT_ACC>) param_trolley_lat_acc_,
 		(ParamFloat<px4::params::TROLLEY_XTK_MAX>) param_trolley_xtk_max_,
 		(ParamFloat<px4::params::TROLLEY_STR_RATE>) param_trolley_str_rate_,
-		(ParamFloat<px4::params::TROLLEY_STR_HOLD>) param_trolley_str_hold_
+		(ParamFloat<px4::params::TROLLEY_STR_HOLD>) param_trolley_str_hold_,
+		(ParamBool<px4::params::FW_W_EN>) param_fw_w_en_,
+		(ParamFloat<px4::params::FW_W_RMAX>) param_fw_w_rmax_
 	)
 };
 

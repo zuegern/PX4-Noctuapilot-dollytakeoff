@@ -79,18 +79,19 @@ float WheelController::control_bodyrate(float dt, float body_z_rate, float groun
 	return math::constrain(_last_output, -1.f, 1.f);
 }
 
-float WheelController::control_attitude(float yaw_setpoint, float yaw)
+float WheelController::control_attitude(float yaw_setpoint, float yaw, float yaw_rate_feedforward)
 {
 	/* Do not calculate control signal with bad inputs */
 	if (!(PX4_ISFINITE(yaw_setpoint) &&
-	      PX4_ISFINITE(yaw))) {
+	      PX4_ISFINITE(yaw) &&
+	      PX4_ISFINITE(yaw_rate_feedforward))) {
 
 		return _body_rate_setpoint;
 	}
 
 	const float yaw_error = wrap_pi(yaw_setpoint - yaw);
 
-	_body_rate_setpoint = yaw_error / _tc; // assume 0 pitch and roll angle, thus jacobian is simply identity matrix
+	_body_rate_setpoint = yaw_error / _tc + yaw_rate_feedforward;
 
 	if (_max_rate > 0.01f) {
 		if (_body_rate_setpoint > 0.f) {

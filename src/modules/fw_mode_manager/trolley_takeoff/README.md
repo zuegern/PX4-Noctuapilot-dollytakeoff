@@ -3,13 +3,15 @@
 This trolley takeoff mode keeps PX4 as the flight and trajectory controller while the trolley steering servos are controlled in one of two ways:
 
 - Direct Pixhawk PWM, using the existing Landing Gear Wheel output assignment in QGroundControl.
-- Raspberry Pi Pico serial control, where PX4 sends steering commands over the magnetic connector and the Pico drives the servos.
+- Raspberry Pi Pico control, where PX4 sends steering commands over the magnetic connector (UART or I2C) and the Pico drives the servos.
 
 In Raspberry Pi Pico mode, the Pico reports link health back to PX4 and slowly returns the wheels to center if the connector disconnects.
 
 ## Raspberry Pi Pico Safety Concept
 
-When `TROLLEY_SRV_CTL=1`, PX4 sends centered, inactive heartbeat commands while trolley takeoff is not running and active steering commands during trolley takeoff. The Pico sends status packets back at about 50 Hz. PX4 only considers the link healthy when the Pico reports a fresh command and echoes a recent PX4 command sequence, so either broken UART direction is detected.
+When `TROLLEY_SRV_CTL=1` (serial) or `2` (I2C), PX4 sends centered, inactive heartbeat commands while trolley takeoff is not running and active steering commands during trolley takeoff. The Pico sends status packets back (about 50 Hz on serial; on I2C, PX4 reads one back with every command exchange). PX4 only considers the link healthy when the Pico reports a fresh command and echoes a recent PX4 command sequence, so either broken link direction is detected.
+
+At arming, PX4 reports the link state once: "Trolley Pico link OK" (info) when the link is healthy, or "Trolley Pico link not ready, trolley takeoff would abort" (critical) when it is not. Because a healthy status requires valid checksummed packets of the correct protocol version with fresh sequence echoes, the OK message also confirms that the Pico is powered, wired correctly, and running matching trolley firmware. Arming itself is not blocked; a takeoff attempted with a dead link aborts immediately at takeoff start.
 
 Before release:
 
@@ -21,8 +23,9 @@ Before release:
 At release and climbout:
 
 - PX4 commands neutral steering for `TROLLEY_STR_HOLD`.
+- While the link is still connected, the Pico centers the wheels at the normal command slew rate so they are straight before the connector separates.
 - If the connector then separates, PX4 treats this as the expected release.
-- The Pico continues slewing the wheels toward center instead of snapping them there.
+- After separation the Pico keeps slewing the wheels gently toward center at the slow failsafe rate instead of snapping them there.
 - If PX4 switches to the next mission item or another mode after release, it sends one final center command before resetting the trolley state.
 
 The Pico does not independently follow a GPS path after disconnect. That is intentional: without PX4 position/attitude estimates, the safest fallback is controlled centering.
@@ -41,7 +44,50 @@ Pixhawk TELEM2 RX  <- Pico GP0 / UART0 TX
 Pixhawk GND        -> Pico GND / trolley battery ground
 ```
 
-Recommended port: TELEM2 on Pixhawk 6C.
+Recommended port: TELEM2 on Pixhawk 6C (JST-GH 6-pin: 1 VCC, 2 TX, 3 RX, 4 CTS, 5 RTS, 6 GND). Leave VCC, CTS, and RTS unconnected.
+
+GPS2 works the same way with `TROLLEY_COM_PORT=4` (JST-GH 6-pin: 1 VCC, 2 TX, 3 RX, 4 SCL, 5 SDA, 6 GND — leave VCC and the I2C pins unconnected, or split the I2C pins off to a sensor; the buses are independent). Keep `GPS_2_CONFIG=0` so no GPS driver owns the port, and note that this spends the port normally used for a second GPS.
+
+Magnetic breakaway umbilical, 5 wires:
+
+```text
+pin 1  GND
+pin 2  Pixhawk TX -> Pico GP1
+pin 3  GND
+pin 4  Pico GP0  -> Pixhawk RX
+pin 5  GND
+```
+
+The protocol only needs TX, RX, and GND; the spare wires are parallel grounds because contact resistance on magnetic pogo pins is the weak point. Put a ~330 ohm resistor in series with each TX line on both sides: with the symmetric pin layout a reversed mating then only swaps the data pins into a harmless, detectable link failure instead of driving two outputs against each other.
+
+### Raspberry Pi Pico I2C Wiring
+
+If no Pixhawk serial port is free, the same packets can run over I2C with `TROLLEY_SRV_CTL=2` and `TROLLEY_LINK_USE_I2C 1` in the Pico sketch. PX4 is the bus master, the Pico an I2C slave at `TROLLEY_I2C_ADDR` (default 0x3B) on `TROLLEY_I2C_BUS`:
+
+```text
+Pixhawk SDA  <-> Pico GP0 / I2C0 SDA
+Pixhawk SCL  <-> Pico GP1 / I2C0 SCL
+Pixhawk GND  <-> Pico GND / trolley battery ground
+```
+
+On the Pixhawk 6C the dedicated 4-pin I2C port (1 VCC 5V, 2 SCL, 3 SDA, 4 GND) carries bus 2 — the same bus as the GPS2 connector pins 4/5 — so the default `TROLLEY_I2C_BUS=2` fits both hookups; leave the port's VCC pin unconnected. Exception per Holybro: 6C units with serial numbers up to pattern `...20221100` wire the dedicated port to bus 4 instead. Never put the trolley on bus 4: it carries the internal barometer and magnetometer, and a fault on the breakaway stub could take out both. On such an old unit use the GPS2 connector pins, which are bus 2 on all revisions. To verify, power the connected Pico and run `i2cdetect -b 2` in the MAVLink console: address 0x3b must appear.
+
+Bus 1 is available on the GPS1 connector I2C pins as an alternative.
+
+Umbilical layout for I2C: pin 1 GND, pin 2 SDA, pin 3 GND, pin 4 SCL, pin 5 GND. Because I2C lines are open-drain, a reversed mating cannot damage anything; it just fails the link detectably. The bus pull-ups sit on the Pixhawk side, so after separation the Pico simply stops receiving and failsafe-centers as usual.
+
+I2C-specific cautions:
+
+- The trolley shares the bus with every other sensor on it. A short or heavy noise on the trolley stub disturbs those sensors until the connector separates, so pick the external bus with the fewest flight-critical devices and keep the stub short.
+- `TROLLEY_I2C_ADDR` must not collide with any sensor on the same bus; command writes to a foreign device could misconfigure it. The default 0x3B avoids common PX4 sensor addresses.
+- PX4 exchanges one command/status pair every 20 ms; the same `TROLLEY_COM_LOSS` timeout and health flags apply as on the serial link. `TROLLEY_COM_PORT` and `TROLLEY_COM_BAUD` are unused in I2C mode.
+
+Power rules:
+
+- No power crosses the umbilical. The Pico and the servos run entirely from the trolley battery, so the Pico keeps centering the wheels after the connector separates.
+- Servos: high-current BEC (two large steering servos stall at 3-6 A each, so plan ~10 A peak) with a 470-1000 uF low-ESR capacitor at the servo rail, 18-20 AWG power wiring.
+- Pico: separate small 5 V supply into VSYS (pin 39), so a servo stall brownout cannot reboot it. Do not power servos from the Pico 3V3 pin.
+- One common ground point on the trolley: battery, BECs, servos, Pico.
 
 Important:
 
@@ -81,7 +127,13 @@ static constexpr bool kRightReversed = false;
 
 Set each servo center so the wheels are straight. Then set min/max so the mechanical steering stops are not overdriven. If one wheel moves the wrong way, change the matching `k...Reversed` value.
 
-The Pico sketch uses the standard `Serial1` UART0 pins, GP0 TX and GP1 RX, at 115200 baud. PX4 must use the same baud rate.
+### Steering Linkage Linearization
+
+If the servo drives the wheel through a multi-bar linkage, the wheel angle is a nonlinear function of the servo angle, and PX4's assumption that the normalized command is proportional to the wheel angle (scaled by `TROLLEY_STR_MAX`) no longer holds. The sketch has a `kSteeringToServoMap` table that corrects this: its entries are the servo pulse fractions that produce equally spaced wheel angles from `-TROLLEY_STR_MAX` to `+TROLLEY_STR_MAX`. The identity default keeps the old linear behavior.
+
+To calibrate, put the trolley on stands, command a sweep of servo positions, measure the actual wheel angle at each (a phone inclinometer on the wheel works), then fill the table with the servo fractions at equally spaced wheel angles. After changing the table, verify that commanding half steering physically gives half of `TROLLEY_STR_MAX` at the wheel.
+
+Also set the link type at the top of the sketch: `TROLLEY_LINK_USE_I2C 1` for the I2C link (GP0 SDA, GP1 SCL, slave address `kI2cAddress` matching `TROLLEY_I2C_ADDR`) or `0` for the UART link (standard `Serial1` UART0 pins, GP0 TX and GP1 RX, 115200 baud — PX4 must use the same baud rate).
 
 ## PX4/QGroundControl Parameters
 
@@ -105,16 +157,19 @@ Servo control source:
 ```text
 TROLLEY_SRV_CTL = 0        # Direct Pixhawk PWM / Landing Gear Wheel output
 TROLLEY_SRV_CTL = 1        # Raspberry Pi Pico serial servo controller and link monitoring
+TROLLEY_SRV_CTL = 2        # Raspberry Pi Pico I2C servo controller and link monitoring
 ```
 
 Direct Pixhawk PWM mode uses the same setup as the original trolley tests: assign both steering servo outputs to Landing Gear Wheel in QGroundControl.
 
-Raspberry Pi Pico link, only used when `TROLLEY_SRV_CTL=1`:
+Raspberry Pi Pico link:
 
 ```text
-TROLLEY_COM_PORT = 1       # TELEM2 on Pixhawk 6C
-TROLLEY_COM_BAUD = 115200  # Must match Pico sketch
-TROLLEY_COM_LOSS = 0.20    # Link-loss timeout in seconds
+TROLLEY_COM_PORT = 1       # Serial mode only: TELEM2 on Pixhawk 6C
+TROLLEY_COM_BAUD = 115200  # Serial mode only: must match Pico sketch
+TROLLEY_I2C_BUS = 2        # I2C mode only: external bus (6C: 1 = GPS1, 2 = GPS2; never 4)
+TROLLEY_I2C_ADDR = 59      # I2C mode only: Pico slave address, must match the sketch (0x3B)
+TROLLEY_COM_LOSS = 0.20    # Link-loss timeout in seconds, both link types
 ```
 
 Takeoff release condition:
@@ -123,14 +178,21 @@ Takeoff release condition:
 TROLLEY_TK_COND = 0        # Airspeed, normal real takeoff
 TROLLEY_TK_COND = 1        # Estimated ground speed, test only
 TROLLEY_TK_COND = 2        # Time, test only
+
+TROLLEY_RLS_HOLD           # Time the speed condition must stay true before release
 ```
+
+`TROLLEY_RLS_HOLD` filters gusts and estimation spikes so one sample above the release threshold does not trigger rotation. It does not apply to the test-only time condition.
 
 Steering/path:
 
 ```text
 TROLLEY_STR_MODE = 0       # Heading hold, runway-like default
-TROLLEY_STR_MODE = 1       # Closed-loop path tracking using PX4 position estimate
+TROLLEY_STR_MODE = 1       # Direct nonlinear path tracking using PX4 position estimate
 TROLLEY_STR_MODE = 2       # Open-loop steering for no-GPS tests
+TROLLEY_STR_MODE = 3       # Path tracking through the existing PX4 wheel PIFF controller
+
+FW_W_EN = 1                # Required for modes 0 and 3, and for every mode with TROLLEY_SRV_CTL=0
 
 TROLLEY_PATH = 0           # Straight
 TROLLEY_PATH = 1           # Constant-radius right turn
@@ -140,21 +202,31 @@ TROLLEY_RADIUS             # Reference-point turn radius
 TROLLEY_WB                 # Trolley wheelbase
 TROLLEY_REF_X              # Forward offset from rear axle to PX4 reference point
 TROLLEY_STR_MAX            # Physical wheel angle limit, not servo horn angle
-TROLLEY_TRK_GAIN           # Closed-loop heading-error feedback magnitude
-TROLLEY_XTK_GAIN           # Closed-loop cross-track feedback gain [1/m]
+TROLLEY_TRK_GAIN           # Mode 1 heading-error feedback magnitude
+TROLLEY_XTK_GAIN           # Modes 1 and 3 cross-track feedback gain [1/m]
 TROLLEY_XTK_MAX            # Pre-release cross-track abort limit
 TROLLEY_LAT_ACC            # Speed-dependent lateral-acceleration limit; -1 disables
 TROLLEY_STR_RATE           # PX4 command slew rate before sending to the Pico
 TROLLEY_STR_HOLD           # Minimum neutral-steering time after release
+
+TROLLEY_ALN_THR            # Alignment taxi throttle; 0 disables the alignment phase
+TROLLEY_ALN_ERR            # Heading error below which the trolley counts as aligned
+TROLLEY_ALN_TO             # Alignment timeout before aborting takeoff
 ```
 
-Closed-loop mode uses path curvature as steering feedforward and adds bounded heading/cross-track feedback. `TROLLEY_REF_X` compensates for the PX4 position reference being ahead of the rear axle and must be nonnegative. Before release, PX4 verifies the controller's sufficient constant-curvature stability condition using `TROLLEY_TRK_GAIN`, `TROLLEY_XTK_GAIN`, `TROLLEY_WB`, `TROLLEY_REF_X`, and `TROLLEY_STR_MAX`. Start with low positive gains and a generous `TROLLEY_XTK_MAX` during low-speed tests. Leave `TROLLEY_LAT_ACC=-1` until a safe trolley-specific limit has been measured; a positive value then uses body-longitudinal speed to limit rear-axle lateral acceleration and rejects an infeasible curve before release.
+### Path Alignment Taxi Phase
+
+For a mission takeoff, the reference path direction is the bearing from the start position to the takeoff waypoint, which the trolley on the ground usually does not match exactly. With `TROLLEY_ALN_THR > 0`, the closed-loop path modes 1 and 3 therefore begin with an alignment taxi phase, following the same low-speed-alignment practice used by automatic-taxi systems for fixed-wing aircraft: PX4 drives the trolley at the configured taxi throttle and steers with full authority until the path heading error stays below `TROLLEY_ALN_ERR` for half a second. It then re-anchors the path at the aligned position, so the alignment arc does not count as cross-track error, and starts the normal throttle ramp. The cross-track abort limit `TROLLEY_XTK_MAX` only applies after alignment; if the trolley cannot align within `TROLLEY_ALN_TO`, takeoff aborts.
+
+In Takeoff mode (not Mission), the reference bearing is the heading at takeoff start, so the alignment phase completes after its half-second check and only adds a short taxi. Heading-hold and open-loop modes skip the phase entirely. The heading estimate used for alignment comes from the EKF (magnetometer, plus GPS course once moving), so check in QGroundControl that the displayed heading matches the real trolley direction before starting — steel, servo wiring, and the trolley battery can distort the magnetometer.
+
+Mode 1 uses path curvature as direct steering feedforward and adds bounded heading/cross-track feedback. Mode 3 instead converts the same path geometry into yaw and yaw-rate references for PX4's existing PIFF wheel controller. `TROLLEY_REF_X` compensates for the PX4 position reference being ahead of the rear axle and must be nonnegative. The Qin-Li sufficient constant-curvature stability check applies only to mode 1. Both closed-loop modes require valid navigation and enforce `TROLLEY_XTK_MAX`, steering feasibility, and the optional lateral-acceleration limit. Leave `TROLLEY_LAT_ACC=-1` until a safe trolley-specific limit has been measured.
 
 Direct-PWM wheel control remains enabled beyond `TROLLEY_STR_HOLD` when necessary for the slew-limited command to finish reaching center.
 
 ## Controller Basis And Limits
 
-The closed-loop implementation follows the offset-reference kinematic bicycle controller proposed by Qin and Li. In the local NED frame, path error, curvature, and steering are positive to the right. For wheelbase `L`, forward reference-point offset `d`, path curvature `kappa`, yaw `psi`, and path heading `psi_D`, the implementation uses:
+Mode 1 follows the offset-reference kinematic bicycle controller proposed by Qin and Li. In the local NED frame, path error, curvature, and steering are positive to the right. For wheelbase `L`, forward reference-point offset `d`, path curvature `kappa`, yaw `psi`, and path heading `psi_D`, it uses:
 
 ```text
 delta_ff = atan(L * kappa / sqrt(1 - (d * kappa)^2))
@@ -172,7 +244,7 @@ When `TROLLEY_LAT_ACC` is enabled, `delta_limit` is reduced using the estimated 
 delta_limit = min(TROLLEY_STR_MAX, atan(TROLLEY_LAT_ACC * L / V^2))
 ```
 
-For closed-loop operation, PX4 also checks the paper's sufficient constant-curvature negative-feedback condition:
+For mode 1, PX4 also checks the paper's sufficient constant-curvature negative-feedback condition:
 
 ```text
 TROLLEY_TRK_GAIN > 0
@@ -180,6 +252,16 @@ TROLLEY_XTK_GAIN >
     d * tan(TROLLEY_STR_MAX)^2
     / (L * sqrt(L^2 + d^2 * tan(TROLLEY_STR_MAX)^2))
 ```
+
+Mode 3 retains the existing PX4 heading/rate PIFF wheel-controller structure and changes only its reference. The path layer supplies:
+
+```text
+psi_sp = wrap_pi(psi_D + theta_0 - atan(TROLLEY_XTK_GAIN * e))
+r_ff   = V * kappa / sqrt(1 - (d * kappa)^2)
+r_sp   = constrain(wrap_pi(psi_sp - psi) / 0.1 + r_ff, +/-FW_W_RMAX)
+```
+
+The existing wheel rate controller then uses `FW_WR_P`, `FW_WR_I`, `FW_WR_FF`, and `FW_WR_IMAX` to calculate the normalized wheel command. `FW_W_EN=1` is required for the PIFF-based modes 0 and 3 in every wiring, and additionally for all steering modes with `TROLLEY_SRV_CTL=0`, because the direct wheel command also passes through the attitude controller's `FW_W_EN`-gated wheel-control output. Trolley takeoff aborts before release if it is disabled. On a straight path, `kappa=0`, so mode 3 becomes position-correcting heading control; on a curve, `r_ff` supplies the nominal turning rate while the yaw error corrects disturbances. Before release, PX4 aborts if the nominal `r_ff` exceeds `FW_W_RMAX`; the radius, speed, or rate limit must be changed instead of silently clipping the requested curve. The Qin-Li stability inequality above is not applied to this different PIFF cascade.
 
 This check is not a flight-safety proof. The model assumes forward motion, negligible tire slip, a reference point on the trolley longitudinal centerline, an accurately known wheelbase and steering angle, and steering that follows its command. The Qin and Li paper reports simulation rather than physical-vehicle validation. Rough-ground operation also introduces steering delay, compliance, tire slip, estimator error, and independent-servo mismatch that the kinematic model does not represent. These effects must be measured and validated progressively before flight.
 
@@ -200,20 +282,34 @@ TROLLEY_STR_MODE = 2
 TROLLEY_PATH = 0, 1, or 2
 ```
 
+## One-Time Checks After Assembly
+
+Do these once when the trolley and UAV first come together, before any powered test:
+
+1. Measure the axle-to-axle wheelbase and set `TROLLEY_WB` (design value 0.68 m).
+2. Set `TROLLEY_STR_MAX` to the real maximum wheel angle (10 deg for the current linkage, not the parameter default).
+3. Mount the servo horn so that at wheel-neutral the crank is parallel to the wheel rod, with the servo's own mid-travel rotated roughly one half spline tooth toward the +10 deg side: the required crank travel is asymmetric (about -77 deg for one lock and +90 deg for the other), and centering the servo on that range keeps both extremes inside a 180 deg servo. Falling a degree short of one lock is fine; near the dead points that costs only ~0.1 deg of wheel angle.
+4. Calibrate the Pico servo pulses: `k...CenterUs` at wheels straight (this absorbs any horn-mounting offset; it will not be 1500), `k...MinUs`/`k...MaxUs` at the pulses where the wheel FIRST reaches the maximum angle on each side. These will be strongly asymmetric around center — that is expected. Then verify the `kSteeringToServoMap` mid-points with a protractor or phone inclinometer (commanded half steering must give half the wheel angle).
+5. Tilt test: with the UAV seated, tilt the loaded trolley sideways until the uphill wheels unload and note the angle. Set `TROLLEY_LAT_ACC` to at most half of `9.81 * tan(tilt angle)`.
+6. With the UAV seated, check the clearance between the propeller tip circle and the trolley front structure and wheels.
+7. Weigh the loaded trolley per axle if possible; the front-axle load determines the steering traction available on soft ground.
+8. Measure `TROLLEY_REF_X`: longitudinal distance from the rear axle forward to the flight controller position with the UAV seated.
+
 ## Starting A Test
 
-1. Set `TROLLEY_SRV_CTL=0` for direct Pixhawk PWM or `TROLLEY_SRV_CTL=1` for Raspberry Pi Pico serial control.
+1. Set `TROLLEY_SRV_CTL=0` for direct Pixhawk PWM, `1` for Raspberry Pi Pico serial control, or `2` for Raspberry Pi Pico I2C control.
 2. For direct Pixhawk PWM, assign both servo outputs to Landing Gear Wheel in QGroundControl.
-3. For Raspberry Pi Pico serial control, upload the Pico sketch and wire Pixhawk UART TX/RX/GND to the Pico.
+3. For Raspberry Pi Pico control, set `TROLLEY_LINK_USE_I2C` in the sketch to match the chosen link, upload it, and wire either Pixhawk UART TX/RX/GND or I2C SDA/SCL/GND to the Pico.
 4. Power the trolley servo BEC, and power the Pico if it is used.
 5. Connect Pixhawk to QGroundControl.
 6. Set the PX4 trolley parameters above.
-7. If using Raspberry Pi Pico mode, make sure the chosen serial port is not used by MAVLink/GPS/another driver.
-8. Reboot Pixhawk after changing serial-related parameters or the servo-control source.
+7. In serial mode, make sure the chosen serial port is not used by MAVLink/GPS/another driver. In I2C mode, make sure no sensor on the chosen bus uses `TROLLEY_I2C_ADDR`.
+8. Reboot Pixhawk after changing link-related parameters or the servo-control source.
 9. Verify that the wheels center when PX4 is not commanding trolley steering.
-10. Start trolley takeoff mode.
-11. In Raspberry Pi Pico mode, watch for a bad-disconnect abort if you unplug the connector before release.
-12. Verify that after release/climbout the wheels return to center slowly.
+10. Verify the steering direction: push the trolley by hand with a closed-loop steering mode active and check that the wheels steer back toward the path. If they steer away, flip the matching `k...Reversed` value in the Pico sketch or reverse the servo output in QGroundControl for direct PWM.
+11. Start trolley takeoff mode.
+12. In Raspberry Pi Pico mode, watch for a bad-disconnect abort if you unplug the connector before release.
+13. Verify that after release/climbout the wheels return to center.
 
 ## Trolley Diagnostics And Graphs
 
@@ -237,9 +333,9 @@ The `debug_array` values use a fixed index order. Important indexes are:
 
 | Index | CSV name | Meaning |
 |---:|---|---|
-| 0 | `state` | Trolley takeoff state |
-| 1 | `steering_mode` | `0` heading, `1` closed-loop path tracking, `2` open loop |
-| 2 | `steering_source` | `0` heading controller, `1` path tracking, `2` open loop, `3` invalid navigation |
+| 0 | `state` | Trolley takeoff state: `0` align to path, `1` throttle ramp, `2` clamped to trolley, `3` climbout, `4` flying, `5` aborted |
+| 1 | `steering_mode` | `0` heading, `1` direct path tracking, `2` open loop, `3` PX4 PIFF path tracking |
+| 2 | `steering_source` | `0` heading controller, `1` direct path tracking, `2` open loop, `3` invalid navigation, `4` PX4 PIFF path tracking |
 | 3 | `path_type` | `0` straight, `1` right curve, `2` left curve |
 | 4 | `navigation_available` | `1` in normal navigation takeoff, `0` in no-navigation takeoff |
 | 5-8 | validity flags | Position, velocity, heading and dead-reckoning status |
@@ -250,6 +346,7 @@ The `debug_array` values use a fixed index order. Important indexes are:
 | 40-42 | guidance | Lateral acceleration and NPFG track error values |
 | 43-50 | trolley controller | Path heading/curvature, heading error, reference offset, feedforward, feedback, steering limit and feasibility |
 | 51-53 | model checks | Body-longitudinal speed, minimum cross-track gain and stability-condition result |
+| 54-55 | PIFF path reference | Desired wheel yaw and yaw-rate feedforward |
 
 Positive `path_error_m` always means that the PX4 reference point is to the right of the path direction. This convention stays consistent for straight and curved paths.
 
@@ -269,6 +366,8 @@ For a first steering graph, plot these against `time_s`:
 ```text
 path_error_m
 controller_heading_error_deg
+wheel_yaw_setpoint_deg
+yaw_rate_feedforward_rad_s
 steering_feedforward_deg
 steering_feedback_deg
 longitudinal_speed_m_s
@@ -282,7 +381,7 @@ xy_valid
 heading_good
 ```
 
-An open-loop straight path intentionally produces `raw_wheel_setpoint = 0`; it cannot correct a position or heading error. Closed-loop path tracking aborts before release when navigation is invalid, its sufficient constant-curvature stability condition is not met, the configured cross-track limit is exceeded, or the requested curve violates the configured steering/lateral-acceleration limit. A `steering_source` value of `3` identifies invalid navigation in diagnostics after release.
+An open-loop straight path intentionally produces `raw_wheel_setpoint = 0`; it cannot correct a position or heading error. Both closed-loop modes abort before release when navigation is invalid, the configured cross-track limit is exceeded, or the requested curve violates the configured steering/lateral-acceleration limit. Mode 1 additionally requires its sufficient constant-curvature stability condition. A `steering_source` value of `3` identifies invalid navigation in diagnostics.
 
 ## Serial Protocol
 

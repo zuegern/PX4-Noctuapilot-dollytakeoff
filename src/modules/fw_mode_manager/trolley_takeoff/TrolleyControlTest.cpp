@@ -64,12 +64,17 @@ TEST(TrolleyControl, StraightPathGeometryAndCorrection)
 	ASSERT_TRUE(centered_output.valid);
 	EXPECT_TRUE(centered_output.stability_condition_met);
 	EXPECT_NEAR(centered_output.normalized_steering, 0.f, 1.e-6f);
+	EXPECT_NEAR(centered_output.desired_yaw, 0.f, 1.e-6f);
+	EXPECT_NEAR(centered_output.yaw_rate_feedforward, 0.f, 1.e-6f);
 
 	const TrolleyPathState right_of_path =
 		calculateStraightPathState(Vector2f{0.f, 0.f}, 0.f, Vector2f{5.f, 1.f});
 	ASSERT_TRUE(right_of_path.valid);
 	EXPECT_GT(right_of_path.error, 0.f);
-	EXPECT_LT(calculateTrolleyControl(right_of_path, 0.f, 5.f, defaultConfig()).normalized_steering, 0.f);
+	const TrolleyControlOutput right_of_path_output =
+		calculateTrolleyControl(right_of_path, 0.f, 5.f, defaultConfig());
+	EXPECT_LT(right_of_path_output.normalized_steering, 0.f);
+	EXPECT_LT(right_of_path_output.desired_yaw, 0.f);
 
 	EXPECT_LT(calculateTrolleyControl(centered, 0.2f, 5.f, defaultConfig()).normalized_steering, 0.f);
 }
@@ -97,6 +102,12 @@ TEST(TrolleyControl, CircularPathUsesReferenceOffset)
 		      / sqrtf(1.f - config.reference_offset * config.reference_offset
 			      * right_curve.curvature * right_curve.curvature));
 	EXPECT_NEAR(output.feedforward_angle, expected_feedforward, 1.e-6f);
+	EXPECT_NEAR(output.desired_yaw, desired_yaw, 1.e-6f);
+	EXPECT_NEAR(output.yaw_rate_feedforward,
+		    5.f * right_curve.curvature
+		    / sqrtf(1.f - config.reference_offset * config.reference_offset
+			    * right_curve.curvature * right_curve.curvature),
+		    1.e-6f);
 }
 
 TEST(TrolleyControl, CircularCrossTrackFeedbackHasCorrectSign)
@@ -125,6 +136,26 @@ TEST(TrolleyControl, CircularCrossTrackFeedbackHasCorrectSign)
 	ASSERT_TRUE(outside.valid);
 	EXPECT_LT(inside.steering_angle, centered.steering_angle);
 	EXPECT_GT(outside.steering_angle, centered.steering_angle);
+	EXPECT_LT(inside.desired_yaw, centered.desired_yaw);
+	EXPECT_GT(outside.desired_yaw, centered.desired_yaw);
+}
+
+TEST(TrolleyControl, PathYawRateFeedforwardFollowsCurvatureSign)
+{
+	const TrolleyControlConfig config = defaultConfig();
+	const TrolleyPathState right_curve =
+		calculateCircularPathState(Vector2f{0.f, 0.f}, 0.f, 10.f, true, Vector2f{0.f, 0.f});
+	const TrolleyPathState left_curve =
+		calculateCircularPathState(Vector2f{0.f, 0.f}, 0.f, 10.f, false, Vector2f{0.f, 0.f});
+
+	const TrolleyControlOutput right = calculateTrolleyControl(right_curve, 0.f, 5.f, config);
+	const TrolleyControlOutput left = calculateTrolleyControl(left_curve, 0.f, 5.f, config);
+
+	ASSERT_TRUE(right.valid);
+	ASSERT_TRUE(left.valid);
+	EXPECT_GT(right.yaw_rate_feedforward, 0.f);
+	EXPECT_LT(left.yaw_rate_feedforward, 0.f);
+	EXPECT_NEAR(right.yaw_rate_feedforward, -left.yaw_rate_feedforward, 1.e-6f);
 }
 
 TEST(TrolleyControl, LateralAccelerationLimitsSteering)

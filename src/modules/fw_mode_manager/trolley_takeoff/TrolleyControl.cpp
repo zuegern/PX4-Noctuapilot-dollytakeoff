@@ -154,6 +154,9 @@ TrolleyControlOutput calculateTrolleyControl(const TrolleyPathState &path, const
 	output.feedforward_angle = atanf(config.wheelbase * path.curvature / radius_scale);
 	output.desired_yaw_offset = -asinf(offset_curvature);
 	output.heading_error = matrix::wrap_pi(matrix::wrap_pi(yaw - path.heading) - output.desired_yaw_offset);
+	output.desired_yaw = matrix::wrap_pi(path.heading + output.desired_yaw_offset
+					     - atanf(config.cross_track_gain * path.error));
+	output.yaw_rate_feedforward = longitudinal_speed * path.curvature / radius_scale;
 
 	// Negative heading/cross-track feedback with a smooth steering-angle saturation.
 	const float feedback_input = -config.heading_gain

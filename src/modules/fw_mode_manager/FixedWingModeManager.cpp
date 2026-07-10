@@ -40,8 +40,45 @@
 
 #include <cmath>
 #include <cstring>
+#include <parameters/param.h>
+#include <px4_platform_common/px4_config.h>
 #include <px4_platform_common/events.h>
 #include <uORB/topics/longitudinal_control_configuration.h>
+
+#if defined(CONFIG_I2C)
+#include <drivers/drv_sensor.h>
+#include <lib/drivers/device/i2c.h>
+
+// I2C client for the trolley Raspberry Pi Pico servo controller. The Pico is an I2C slave:
+// a write transfers one command packet, a read returns the latest status packet. The packet
+// format is identical to the serial link.
+class TrolleyPicoI2C : public device::I2C
+{
+public:
+	TrolleyPicoI2C(const int bus, const uint16_t address) :
+		I2C(DRV_DEVTYPE_UNUSED, "trolley_pico", bus, address, 100000)
+	{
+		_retries = 1;
+	}
+
+	int writeCommand(const uint8_t *buffer, const unsigned length) { return transfer(buffer, length, nullptr, 0); }
+	int readStatus(uint8_t *buffer, const unsigned length) { return transfer(nullptr, 0, buffer, length); }
+
+private:
+	int probe() override
+	{
+		// Only accept the device when it answers with a plausible status packet, so init
+		// keeps retrying until the Pico is powered and responding on this address.
+		uint8_t status[8] {};
+
+		if (transfer(nullptr, 0, status, sizeof(status)) != PX4_OK) {
+			return -EIO;
+		}
+
+		return (status[0] == 'T' && status[1] == 'S') ? PX4_OK : -EIO;
+	}
+};
+#endif // CONFIG_I2C
 
 using math::radians;
 
@@ -112,14 +149,17 @@ enum TrolleyDebugIndex {
 	TROLLEY_DEBUG_PATH_FEASIBLE,
 	TROLLEY_DEBUG_LONGITUDINAL_SPEED,
 	TROLLEY_DEBUG_MINIMUM_CROSS_TRACK_GAIN,
-	TROLLEY_DEBUG_STABILITY_CONDITION_MET
+	TROLLEY_DEBUG_STABILITY_CONDITION_MET,
+	TROLLEY_DEBUG_WHEEL_YAW_SETPOINT,
+	TROLLEY_DEBUG_YAW_RATE_FEEDFORWARD
 };
 
 enum TrolleyDebugSteeringSource {
 	TROLLEY_DEBUG_SOURCE_HEADING = 0,
 	TROLLEY_DEBUG_SOURCE_PATH_TRACKING = 1,
 	TROLLEY_DEBUG_SOURCE_OPEN_LOOP = 2,
-	TROLLEY_DEBUG_SOURCE_NAVIGATION_INVALID = 3
+	TROLLEY_DEBUG_SOURCE_NAVIGATION_INVALID = 3,
+	TROLLEY_DEBUG_SOURCE_PATH_HEADING = 4
 };
 
 FixedWingModeManager::FixedWingModeManager() :
@@ -150,6 +190,8 @@ FixedWingModeManager::FixedWingModeManager() :
 
 FixedWingModeManager::~FixedWingModeManager()
 {
+	closeTrolleySerial();
+	closeTrolleyI2C();
 	perf_free(_loop_perf);
 }
 
@@ -1177,9 +1219,35 @@ FixedWingModeManager::control_auto_path(const float control_interval, const Vect
 }
 
 bool
+FixedWingModeManager::trolleySerialModeEnabled() const
+{
+	return trolleyTakeoffEnabled() && _param_trolley_servo_ctl.get() == TROLLEY_SERVO_CONTROL_PICO_SERIAL;
+}
+
+bool
+FixedWingModeManager::trolleyI2CModeEnabled() const
+{
+	return trolleyTakeoffEnabled() && _param_trolley_servo_ctl.get() == TROLLEY_SERVO_CONTROL_PICO_I2C;
+}
+
+bool
 FixedWingModeManager::trolleyCommunicationEnabled() const
 {
-	return trolleyTakeoffEnabled() && _param_trolley_servo_ctl.get() == TROLLEY_SERVO_CONTROL_PICO;
+	return trolleySerialModeEnabled() || trolleyI2CModeEnabled();
+}
+
+bool
+FixedWingModeManager::trolleyLinkTransportReady() const
+{
+	if (trolleySerialModeEnabled()) {
+		return _trolley_serial_fd >= 0;
+	}
+
+	if (trolleyI2CModeEnabled()) {
+		return _trolley_pico_i2c != nullptr;
+	}
+
+	return false;
 }
 
 bool
@@ -1189,7 +1257,7 @@ FixedWingModeManager::trolleyLinkHealthy(const hrt_abstime now) const
 		return true;
 	}
 
-	return _trolley_serial_fd >= 0
+	return trolleyLinkTransportReady()
 	       && _trolley_serial_seen_status
 	       && _trolley_serial_status_healthy
 	       && (now - _trolley_serial_last_rx) < (math::max(_param_trolley_com_loss.get(), 0.05f) * 1_s);
@@ -1225,22 +1293,140 @@ FixedWingModeManager::trolleySerialBaudrate() const
 }
 
 void
-FixedWingModeManager::updateTrolleySerialLink(const hrt_abstime now)
+FixedWingModeManager::updateTrolleyLink(const hrt_abstime now)
 {
-	if (!trolleyCommunicationEnabled()) {
+	if (trolleySerialModeEnabled()) {
+		closeTrolleyI2C();
+
+		if (openTrolleySerial(now)) {
+			pollTrolleySerialStatus(now);
+
+			// Keep both directions of the link exercised before takeoff starts. The inactive
+			// command also guarantees that the Pico holds the wheels centered while disarmed.
+			if (!_trolley_takeoff.isInitialized()) {
+				sendTrolleyCommand(now, 0.f);
+			}
+		}
+
+	} else if (trolleyI2CModeEnabled()) {
 		closeTrolleySerial();
-		return;
+
+		// On I2C the status read rides along with every command exchange, so the pre-takeoff
+		// heartbeat exercises both directions of the link by itself.
+		if (initTrolleyI2C(now) && !_trolley_takeoff.isInitialized()) {
+			sendTrolleyCommand(now, 0.f);
+		}
+
+	} else {
+		closeTrolleySerial();
+		closeTrolleyI2C();
+	}
+}
+
+bool
+FixedWingModeManager::initTrolleyI2C(const hrt_abstime now)
+{
+#if defined(CONFIG_I2C)
+
+	if (_trolley_pico_i2c != nullptr) {
+		return true;
 	}
 
-	if (openTrolleySerial(now)) {
-		pollTrolleySerialStatus(now);
+	if ((now - _trolley_i2c_last_init_attempt) < 1_s) {
+		return false;
+	}
 
-		// Keep both directions of the link exercised before takeoff starts. The inactive command
-		// also guarantees that the Pico holds the wheels centered while PX4 is disarmed.
-		if (!_trolley_takeoff.isInitialized()) {
-			sendTrolleySerialCommand(now, 0.f);
+	_trolley_i2c_last_init_attempt = now;
+
+	const int32_t bus = _param_trolley_i2c_bus.get();
+	const int32_t address = _param_trolley_i2c_addr.get();
+
+	if (address < 0x08 || address > 0x77) {
+		return false;
+	}
+
+	TrolleyPicoI2C *device = new TrolleyPicoI2C(bus, static_cast<uint16_t>(address));
+
+	if (device == nullptr) {
+		return false;
+	}
+
+	// init() probes for a valid status packet, so this retries until the Pico answers.
+	if (device->init() != PX4_OK) {
+		delete device;
+		return false;
+	}
+
+	_trolley_pico_i2c = device;
+	_trolley_i2c_last_exchange = 0;
+	resetTrolleyLinkParserState();
+
+	return true;
+#else
+	(void)now;
+	return false;
+#endif // CONFIG_I2C
+}
+
+void
+FixedWingModeManager::closeTrolleyI2C()
+{
+#if defined(CONFIG_I2C)
+
+	if (_trolley_pico_i2c != nullptr) {
+		delete _trolley_pico_i2c;
+		_trolley_pico_i2c = nullptr;
+		resetTrolleyLinkParserState();
+	}
+
+#endif // CONFIG_I2C
+}
+
+void
+FixedWingModeManager::resetTrolleyLinkParserState()
+{
+	_trolley_serial_rx_index = 0;
+	_trolley_serial_seen_status = false;
+	_trolley_serial_status_healthy = false;
+	_trolley_serial_last_rx = 0;
+}
+
+bool
+FixedWingModeManager::trolleySerialPortInUseByOtherDriver() const
+{
+	// PX4 serial-configuration codes (see the SER_ enum used by MAV_x_CONFIG etc.)
+	int32_t port_config_code = 0;
+
+	switch (_param_trolley_com_port.get()) {
+	case 1: port_config_code = 102; break; // TELEM2
+	case 2: port_config_code = 103; break; // TELEM3
+	case 3: port_config_code = 101; break; // TELEM1
+	case 4: port_config_code = 202; break; // GPS2
+	case 5: port_config_code = 201; break; // GPS1
+
+	default: return false;
+	}
+
+	static constexpr const char *port_config_param_names[] = {
+		"MAV_0_CONFIG", "MAV_1_CONFIG", "MAV_2_CONFIG",
+		"GPS_1_CONFIG", "GPS_2_CONFIG", "UXRCE_DDS_CFG"
+	};
+
+	for (const char *param_name : port_config_param_names) {
+		const param_t handle = param_find_no_notification(param_name);
+
+		if (handle == PARAM_INVALID) {
+			continue;
+		}
+
+		int32_t value = 0;
+
+		if (param_get(handle, &value) == PX4_OK && value == port_config_code) {
+			return true;
 		}
 	}
+
+	return false;
 }
 
 bool
@@ -1259,6 +1445,16 @@ FixedWingModeManager::openTrolleySerial(const hrt_abstime now)
 	const char *device = trolleySerialDevice();
 
 	if (device == nullptr) {
+		return false;
+	}
+
+	if (trolleySerialPortInUseByOtherDriver()) {
+		if (!_trolley_serial_conflict_warned) {
+			_trolley_serial_conflict_warned = true;
+			events::send(events::ID("trolley_serial_port_conflict"), events::Log::Error,
+				     "Trolley serial port is assigned to another driver, not opening");
+		}
+
 		return false;
 	}
 
@@ -1292,10 +1488,7 @@ FixedWingModeManager::openTrolleySerial(const hrt_abstime now)
 		return false;
 	}
 
-	_trolley_serial_rx_index = 0;
-	_trolley_serial_seen_status = false;
-	_trolley_serial_status_healthy = false;
-	_trolley_serial_last_rx = 0;
+	resetTrolleyLinkParserState();
 
 	return true;
 }
@@ -1305,13 +1498,10 @@ FixedWingModeManager::closeTrolleySerial()
 {
 	if (_trolley_serial_fd >= 0) {
 		::close(_trolley_serial_fd);
+		_trolley_serial_fd = -1;
+		_trolley_serial_conflict_warned = false;
+		resetTrolleyLinkParserState();
 	}
-
-	_trolley_serial_fd = -1;
-	_trolley_serial_rx_index = 0;
-	_trolley_serial_seen_status = false;
-	_trolley_serial_status_healthy = false;
-	_trolley_serial_last_rx = 0;
 }
 
 void
@@ -1372,15 +1562,26 @@ FixedWingModeManager::parseTrolleySerialByte(const uint8_t byte, const hrt_absti
 						&& (status_flags & TROLLEY_SERIAL_STATUS_COMMAND_FRESH)
 						&& !(status_flags & TROLLEY_SERIAL_STATUS_FAILSAFE_CENTERING)
 						&& sequence_lag <= TROLLEY_SERIAL_MAX_SEQUENCE_LAG;
+
+		// The checksum byte belongs to this completed packet; do not reuse it as a frame start.
+		_trolley_serial_rx_index = 0;
+		return;
 	}
 
 	_trolley_serial_rx_index = (byte == 'T') ? 1 : 0;
 }
 
 void
-FixedWingModeManager::sendTrolleySerialCommand(const hrt_abstime now, const float steering_setpoint)
+FixedWingModeManager::sendTrolleyCommand(const hrt_abstime now, const float steering_setpoint, const bool force_now)
 {
-	if (!trolleyCommunicationEnabled() || _trolley_serial_fd < 0) {
+	if (!trolleyLinkTransportReady()) {
+		return;
+	}
+
+	// On I2C every command is a blocking bus exchange on a shared bus, so limit the rate.
+	if (trolleyI2CModeEnabled() && !force_now
+	    && _trolley_i2c_last_exchange != 0
+	    && (now - _trolley_i2c_last_exchange) < TROLLEY_I2C_EXCHANGE_INTERVAL) {
 		return;
 	}
 
@@ -1421,11 +1622,42 @@ FixedWingModeManager::sendTrolleySerialCommand(const hrt_abstime now, const floa
 	packet[11] = 0;
 	packet[12] = trolleySerialChecksum(packet, TROLLEY_SERIAL_COMMAND_LEN - 1);
 
-	const ssize_t written = ::write(_trolley_serial_fd, packet, sizeof(packet));
+	if (trolleySerialModeEnabled()) {
+		const ssize_t written = ::write(_trolley_serial_fd, packet, sizeof(packet));
 
-	if (written != static_cast<ssize_t>(sizeof(packet))) {
-		closeTrolleySerial();
+		if (written != static_cast<ssize_t>(sizeof(packet))) {
+			closeTrolleySerial();
+		}
+
+		return;
 	}
+
+#if defined(CONFIG_I2C)
+
+	if (trolleyI2CModeEnabled() && _trolley_pico_i2c != nullptr) {
+		_trolley_i2c_last_exchange = now;
+
+		// Write the command, then read back the latest status. Both directions of the link are
+		// exercised in one exchange; failures simply leave the status stale until the
+		// TROLLEY_COM_LOSS timeout declares the link lost.
+		if (_trolley_pico_i2c->writeCommand(packet, sizeof(packet)) != PX4_OK) {
+			return;
+		}
+
+		uint8_t status[TROLLEY_SERIAL_STATUS_LEN] {};
+
+		if (_trolley_pico_i2c->readStatus(status, sizeof(status)) != PX4_OK) {
+			return;
+		}
+
+		_trolley_serial_rx_index = 0;
+
+		for (unsigned i = 0; i < sizeof(status); ++i) {
+			parseTrolleySerialByte(status[i], now);
+		}
+	}
+
+#endif // CONFIG_I2C
 }
 
 uint8_t
@@ -1441,7 +1673,7 @@ FixedWingModeManager::trolleySerialChecksum(const uint8_t *buffer, const uint8_t
 }
 
 float
-FixedWingModeManager::trolleyHeadingWheelSetpoint(const hrt_abstime now)
+FixedWingModeManager::trolleyWheelControllerSetpoint(const hrt_abstime now)
 {
 	_landing_gear_wheel_sub.update(&_trolley_heading_wheel_output);
 
@@ -1459,8 +1691,29 @@ FixedWingModeManager::trolleyHeadingWheelSetpoint(const hrt_abstime now)
 	return 0.f;
 }
 
+uint8_t
+FixedWingModeManager::trolleyRunwayControlState() const
+{
+	// Maps the trolley state machine onto the runway-control states consumed by the attitude
+	// controller and land detector. The alignment taxi is an early ground phase like the ramp.
+	switch (_trolley_takeoff.getState()) {
+	case trolleytakeoff::ALIGN_TO_PATH:
+	case trolleytakeoff::THROTTLE_RAMP:
+		return fixed_wing_runway_control_s::STATE_THROTTLE_RAMP;
+
+	case trolleytakeoff::CLAMPED_TO_TROLLEY:
+		return fixed_wing_runway_control_s::STATE_CLAMPED_TO_RUNWAY;
+
+	case trolleytakeoff::CLIMBOUT:
+		return fixed_wing_runway_control_s::STATE_CLIMBOUT;
+
+	default:
+		return fixed_wing_runway_control_s::STATE_FLYING;
+	}
+}
+
 bool
-FixedWingModeManager::trolleyPathTrackingNavigationValid() const
+FixedWingModeManager::trolleyPathNavigationValid() const
 {
 	return _local_pos.xy_valid
 	       && _local_pos.v_xy_valid
@@ -1473,14 +1726,36 @@ FixedWingModeManager::trolleyPathTrackingNavigationValid() const
 }
 
 void
+FixedWingModeManager::abortTrolleyTakeoffForInvalidSteeringConfiguration()
+{
+	if (_trolley_takeoff.wheelControllerConfigured()
+	    || _trolley_takeoff.isReleased()
+	    || _trolley_takeoff.isAborted()) {
+		return;
+	}
+
+	// The PIFF modes always run inside the attitude controller's wheel-control path. With direct
+	// Pixhawk PWM output, the path/open-loop setpoints also pass through that same FW_W_EN-gated
+	// block, so every steering mode silently outputs zero without it.
+	const bool direct_pwm_output = _param_trolley_servo_ctl.get() == TROLLEY_SERVO_CONTROL_DIRECT;
+
+	if (_trolley_takeoff.wheelControllerSteeringEnabled()
+	    || (direct_pwm_output && _trolley_takeoff.wheelSteeringEnabled())) {
+		events::send(events::ID("trolley_takeoff_wheel_control_disabled"), events::Log::Critical,
+			     "Trolley steering requires FW_W_EN, aborting takeoff");
+		_trolley_takeoff.abort();
+	}
+}
+
+void
 FixedWingModeManager::abortTrolleyTakeoffForInvalidNavigation()
 {
-	if (_trolley_takeoff.pathTrackingSteeringEnabled()
+	if (_trolley_takeoff.navigationSteeringEnabled()
 	    && !_trolley_takeoff.isReleased()
 	    && !_trolley_takeoff.isAborted()
-	    && !trolleyPathTrackingNavigationValid()) {
+	    && !trolleyPathNavigationValid()) {
 		events::send(events::ID("trolley_takeoff_navigation_invalid"), events::Log::Critical,
-			     "Trolley path tracking lost navigation, aborting takeoff");
+			     "Trolley path control lost navigation, aborting takeoff");
 		_trolley_takeoff.abort();
 	}
 }
@@ -1505,10 +1780,10 @@ FixedWingModeManager::trolleyPathState(const Vector2f &start_pos_local, const fl
 }
 
 void
-FixedWingModeManager::abortTrolleyTakeoffForPathTracking(const trolleytakeoff::TrolleyPathState &path_state,
+FixedWingModeManager::abortTrolleyTakeoffForPathControl(const trolleytakeoff::TrolleyPathState &path_state,
 		const trolleytakeoff::TrolleyControlOutput &control_output)
 {
-	if (!_trolley_takeoff.pathTrackingSteeringEnabled()
+	if (!_trolley_takeoff.navigationSteeringEnabled()
 	    || _trolley_takeoff.isReleased()
 	    || _trolley_takeoff.isAborted()) {
 		return;
@@ -1521,7 +1796,7 @@ FixedWingModeManager::abortTrolleyTakeoffForPathTracking(const trolleytakeoff::T
 		return;
 	}
 
-	if (!control_output.stability_condition_met) {
+	if (_trolley_takeoff.pathTrackingSteeringEnabled() && !control_output.stability_condition_met) {
 		events::send(events::ID("trolley_takeoff_gains_unstable"), events::Log::Critical,
 			     "Trolley path gains fail stability condition, aborting takeoff");
 		_trolley_takeoff.abort();
@@ -1530,7 +1805,10 @@ FixedWingModeManager::abortTrolleyTakeoffForPathTracking(const trolleytakeoff::T
 
 	const float maximum_path_error = _trolley_takeoff.maximumPathError();
 
-	if (maximum_path_error > FLT_EPSILON && fabsf(path_state.error) > maximum_path_error) {
+	// During the alignment taxi the trolley intentionally arcs away from the original path line,
+	// so the cross-track guard only applies once the throttle ramp has started.
+	if (!_trolley_takeoff.isAligningToPath()
+	    && maximum_path_error > FLT_EPSILON && fabsf(path_state.error) > maximum_path_error) {
 		events::send(events::ID("trolley_takeoff_path_deviation"), events::Log::Critical,
 			     "Trolley path deviation exceeded, aborting takeoff");
 		_trolley_takeoff.abort();
@@ -1540,6 +1818,17 @@ FixedWingModeManager::abortTrolleyTakeoffForPathTracking(const trolleytakeoff::T
 	if (!control_output.path_feasible) {
 		events::send(events::ID("trolley_takeoff_path_infeasible"), events::Log::Critical,
 			     "Trolley path exceeds steering limit, aborting takeoff");
+		_trolley_takeoff.abort();
+		return;
+	}
+
+	const float maximum_wheel_yaw_rate = _trolley_takeoff.maximumWheelYawRate();
+
+	if (_trolley_takeoff.pathHeadingSteeringEnabled()
+	    && maximum_wheel_yaw_rate > 0.01f
+	    && fabsf(control_output.yaw_rate_feedforward) > maximum_wheel_yaw_rate) {
+		events::send(events::ID("trolley_takeoff_rate_infeasible"), events::Log::Critical,
+			     "Trolley path exceeds FW_W_RMAX, aborting takeoff");
 		_trolley_takeoff.abort();
 	}
 }
@@ -1587,6 +1876,10 @@ FixedWingModeManager::publishTrolleyDebug(const hrt_abstime now, const Vector2f 
 
 	} else if (_trolley_takeoff.steeringMode() == trolleytakeoff::STEERING_OPEN_LOOP) {
 		steering_source = TROLLEY_DEBUG_SOURCE_OPEN_LOOP;
+
+	} else if (_trolley_takeoff.steeringMode() == trolleytakeoff::STEERING_PATH_HEADING) {
+		steering_source = navigation_available ? TROLLEY_DEBUG_SOURCE_PATH_HEADING :
+				  TROLLEY_DEBUG_SOURCE_NAVIGATION_INVALID;
 	}
 
 	const float desired_minus_yaw = PX4_ISFINITE(guidance.course_setpoint) && PX4_ISFINITE(_yaw) ?
@@ -1659,6 +1952,9 @@ FixedWingModeManager::publishTrolleyDebug(const hrt_abstime now, const Vector2f 
 		control_output.valid ? control_output.minimum_cross_track_gain : NAN;
 	debug.data[TROLLEY_DEBUG_STABILITY_CONDITION_MET] =
 		control_output.valid && control_output.stability_condition_met ? 1.f : 0.f;
+	debug.data[TROLLEY_DEBUG_WHEEL_YAW_SETPOINT] = control_output.valid ? control_output.desired_yaw : NAN;
+	debug.data[TROLLEY_DEBUG_YAW_RATE_FEEDFORWARD] =
+		control_output.valid ? control_output.yaw_rate_feedforward : NAN;
 
 	_trolley_debug_pub.publish(debug);
 }
@@ -1720,7 +2016,8 @@ FixedWingModeManager::sendTrolleyTakeoffExitCommand(const hrt_abstime &now)
 	}
 
 	publishTrolleyWheelCenterSetpoint(now);
-	sendTrolleySerialCommand(now, 0.f);
+	// The final center command must not be swallowed by the I2C exchange rate limit.
+	sendTrolleyCommand(now, 0.f, true);
 }
 
 DirectionalGuidanceOutput
@@ -1728,7 +2025,7 @@ FixedWingModeManager::navigateTrolleyPath(const Vector2f &start_pos_local, const
 		const Vector2f &vehicle_pos, const Vector2f &ground_vel,
 		const trolleytakeoff::TrolleyPathState &path_state)
 {
-	if (!_trolley_takeoff.pathTrackingSteeringEnabled() || !path_state.valid) {
+	if (!_trolley_takeoff.navigationSteeringEnabled() || !path_state.valid) {
 		return navigateLine(start_pos_local, takeoff_bearing, vehicle_pos, ground_vel, _wind_vel);
 	}
 
@@ -1826,24 +2123,35 @@ FixedWingModeManager::control_auto_takeoff(const hrt_abstime &now, const float c
 		trolleytakeoff::TrolleyControlOutput trolley_control_output{};
 
 		if (trolley_takeoff_enabled) {
+			abortTrolleyTakeoffForInvalidSteeringConfiguration();
 			abortTrolleyTakeoffForInvalidNavigation();
 
 			if (!_trolley_takeoff.isAborted()) {
 				trolley_path_state = trolleyPathState(start_pos_local, takeoff_bearing, local_2D_position);
 
-				if (_trolley_takeoff.pathTrackingSteeringEnabled()) {
+				if (_trolley_takeoff.navigationSteeringEnabled()) {
 					trolley_control_output = _trolley_takeoff.pathTrackingWheelSteeringSetpoint(
 								 trolley_path_state, _yaw, estimated_longitudinal_speed);
-					abortTrolleyTakeoffForPathTracking(trolley_path_state, trolley_control_output);
+					abortTrolleyTakeoffForPathControl(trolley_path_state, trolley_control_output);
 				}
 			}
 
+			const bool was_aligning_to_path = _trolley_takeoff.isAligningToPath();
+
 			_trolley_takeoff.update(now, takeoff_airspeed, _airspeed_eas, estimated_ground_speed,
 						_current_altitude - _takeoff_ground_alt, clearance_altitude_amsl - _takeoff_ground_alt,
-						trolley_link_required, trolley_link_healthy);
+						trolley_control_output.heading_error, trolley_link_required, trolley_link_healthy);
+
+			// Re-anchor the path at the aligned pose: the alignment arc moved the trolley away from
+			// the original start position, and the accelerating ground roll should track a fresh line
+			// from here toward the takeoff waypoint.
+			if (was_aligning_to_path
+			    && _trolley_takeoff.getState() == trolleytakeoff::THROTTLE_RAMP) {
+				_takeoff_init_position = global_position;
+			}
 
 			if (_trolley_takeoff.isAborted()) {
-				sendTrolleySerialCommand(now, 0.f);
+				sendTrolleyCommand(now, 0.f);
 				publishTrolleyTakeoffAbortSetpoints(now);
 				return;
 			}
@@ -1894,8 +2202,11 @@ FixedWingModeManager::control_auto_takeoff(const hrt_abstime &now, const float c
 			float raw_trolley_wheel_setpoint = NAN;
 			float target_trolley_wheel_setpoint = 0.f;
 
-			if (_trolley_takeoff.headingSteeringEnabled() && trolley_link_required) {
-				raw_trolley_wheel_setpoint = trolleyHeadingWheelSetpoint(now);
+			if (_trolley_takeoff.wheelControllerSteeringEnabled()) {
+				// Track the wheel-controller output in direct-PWM mode too, so the handover to the
+				// direct centering command at release starts from the last wheel deflection and slews
+				// to center instead of snapping there.
+				raw_trolley_wheel_setpoint = trolleyWheelControllerSetpoint(now);
 				target_trolley_wheel_setpoint = raw_trolley_wheel_setpoint;
 
 			} else if (_trolley_takeoff.pathTrackingSteeringEnabled()) {
@@ -1914,7 +2225,7 @@ FixedWingModeManager::control_auto_takeoff(const hrt_abstime &now, const float c
 			publishTrolleyDebug(now, start_pos_local, takeoff_bearing, local_2D_position, ground_speed, sp,
 					   raw_trolley_wheel_setpoint, trolley_nudge, true, trolley_link_required,
 					   trolley_link_healthy, trolley_path_state, trolley_control_output);
-			sendTrolleySerialCommand(now, _trolley_takeoff.wheelSteeringSetpoint() + trolley_nudge);
+			sendTrolleyCommand(now, _trolley_takeoff.wheelSteeringSetpoint() + trolley_nudge);
 		}
 
 		_ctrl_configuration_handler.setPitchMin(pitch_min);
@@ -1924,7 +2235,7 @@ FixedWingModeManager::control_auto_takeoff(const hrt_abstime &now, const float c
 
 		_flaps_setpoint = _param_fw_flaps_to_scl.get();
 
-		const uint8_t takeoff_state = trolley_takeoff_enabled ? static_cast<uint8_t>(_trolley_takeoff.getState()) :
+		const uint8_t takeoff_state = trolley_takeoff_enabled ? trolleyRunwayControlState() :
 					      static_cast<uint8_t>(_runway_takeoff.getState());
 
 		// retract ladning gear once passed the climbout state
@@ -1944,6 +2255,14 @@ FixedWingModeManager::control_auto_takeoff(const hrt_abstime &now, const float c
 				&& _trolley_takeoff.directWheelSteeringEnabled();
 		fw_runway_control.wheel_steering_setpoint = trolley_takeoff_enabled ?
 				(trolley_link_required ? 0.f : _trolley_takeoff.wheelSteeringSetpoint()) : NAN;
+		const bool external_trolley_yaw_control = trolley_takeoff_enabled
+				&& _trolley_takeoff.pathHeadingSteeringEnabled()
+				&& trolley_control_output.valid;
+		fw_runway_control.wheel_yaw_control_external = external_trolley_yaw_control;
+		fw_runway_control.wheel_yaw_setpoint = external_trolley_yaw_control ?
+				trolley_control_output.desired_yaw : NAN;
+		fw_runway_control.wheel_yaw_rate_feedforward = external_trolley_yaw_control ?
+				trolley_control_output.yaw_rate_feedforward : 0.f;
 
 		_fixed_wing_runway_control_pub.publish(fw_runway_control);
 
@@ -2120,13 +2439,14 @@ FixedWingModeManager::control_auto_takeoff_no_nav(const hrt_abstime &now, const 
 		const trolleytakeoff::TrolleyControlOutput trolley_control_output{};
 
 		if (trolley_takeoff_enabled) {
+			abortTrolleyTakeoffForInvalidSteeringConfiguration();
 			abortTrolleyTakeoffForInvalidNavigation();
 			_trolley_takeoff.update(now, takeoff_airspeed, _airspeed_eas, estimated_ground_speed,
 						_current_altitude - _takeoff_ground_alt, clearance_altitude_amsl - _takeoff_ground_alt,
-						trolley_link_required, trolley_link_healthy);
+						trolley_control_output.heading_error, trolley_link_required, trolley_link_healthy);
 
 			if (_trolley_takeoff.isAborted()) {
-				sendTrolleySerialCommand(now, 0.f);
+				sendTrolleyCommand(now, 0.f);
 				publishTrolleyTakeoffAbortSetpoints(now);
 				return;
 			}
@@ -2166,8 +2486,8 @@ FixedWingModeManager::control_auto_takeoff_no_nav(const hrt_abstime &now, const 
 		if (trolley_takeoff_enabled) {
 			float raw_trolley_wheel_setpoint = NAN;
 
-			if (_trolley_takeoff.headingSteeringEnabled() && trolley_link_required) {
-				raw_trolley_wheel_setpoint = trolleyHeadingWheelSetpoint(now);
+			if (_trolley_takeoff.wheelControllerSteeringEnabled()) {
+				raw_trolley_wheel_setpoint = trolleyWheelControllerSetpoint(now);
 
 			} else if (_trolley_takeoff.openLoopSteeringEnabled()) {
 				raw_trolley_wheel_setpoint =
@@ -2183,7 +2503,7 @@ FixedWingModeManager::control_auto_takeoff_no_nav(const hrt_abstime &now, const 
 					   local_velocity, no_navigation_guidance, raw_trolley_wheel_setpoint, trolley_nudge,
 					   false, trolley_link_required, trolley_link_healthy, trolley_path_state,
 					   trolley_control_output);
-			sendTrolleySerialCommand(now, _trolley_takeoff.wheelSteeringSetpoint() + trolley_nudge);
+			sendTrolleyCommand(now, _trolley_takeoff.wheelSteeringSetpoint() + trolley_nudge);
 		}
 
 		_ctrl_configuration_handler.setPitchMin(pitch_min);
@@ -2192,7 +2512,7 @@ FixedWingModeManager::control_auto_takeoff_no_nav(const hrt_abstime &now, const 
 
 		_flaps_setpoint = _param_fw_flaps_to_scl.get();
 
-		const uint8_t takeoff_state = trolley_takeoff_enabled ? static_cast<uint8_t>(_trolley_takeoff.getState()) :
+		const uint8_t takeoff_state = trolley_takeoff_enabled ? trolleyRunwayControlState() :
 					      static_cast<uint8_t>(_runway_takeoff.getState());
 
 		// retract ladning gear once passed the climbout state
@@ -2212,6 +2532,9 @@ FixedWingModeManager::control_auto_takeoff_no_nav(const hrt_abstime &now, const 
 				&& _trolley_takeoff.directWheelSteeringEnabled();
 		fw_runway_control.wheel_steering_setpoint = trolley_takeoff_enabled ?
 				(trolley_link_required ? 0.f : _trolley_takeoff.wheelSteeringSetpoint()) : NAN;
+		fw_runway_control.wheel_yaw_control_external = false;
+		fw_runway_control.wheel_yaw_setpoint = NAN;
+		fw_runway_control.wheel_yaw_rate_feedforward = 0.f;
 
 		_fixed_wing_runway_control_pub.publish(fw_runway_control);
 
@@ -3025,7 +3348,26 @@ FixedWingModeManager::Run()
 		Vector2d curr_pos(_current_latitude, _current_longitude);
 		Vector2f ground_speed(_local_pos.vx, _local_pos.vy);
 
-		updateTrolleySerialLink(now);
+		updateTrolleyLink(now);
+
+		// Report the trolley link state exactly once per arming, so a dead or mis-flashed Pico is
+		// visible in QGC at arm time instead of only as an abort at throttle-up. A healthy status
+		// requires valid checksummed packets of the right protocol version with fresh sequence
+		// echoes, so it also confirms the Pico is running matching trolley firmware.
+		const bool armed_now = _control_mode.flag_armed;
+
+		if (armed_now && !_trolley_was_armed && trolleyCommunicationEnabled()) {
+			if (trolleyLinkHealthy(now)) {
+				events::send(events::ID("trolley_link_prearm_ok"), events::Log::Info,
+					     "Trolley Pico link OK");
+
+			} else {
+				events::send(events::ID("trolley_link_prearm_fail"), events::Log::Critical,
+					     "Trolley Pico link not ready, trolley takeoff would abort");
+			}
+		}
+
+		_trolley_was_armed = armed_now;
 
 		set_control_mode_current(now);
 

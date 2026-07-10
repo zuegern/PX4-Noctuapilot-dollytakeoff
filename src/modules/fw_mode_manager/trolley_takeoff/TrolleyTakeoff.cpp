@@ -48,13 +48,25 @@ using namespace time_literals;
 namespace trolleytakeoff
 {
 
+	// Minimum time the alignment heading condition must hold before the throttle ramp starts.
+	static constexpr hrt_abstime kAlignConditionHoldTime = 500_ms;
+
 	void TrolleyTakeoff::init(const hrt_abstime &time_now, const bool trolley_link_required, const bool trolley_link_healthy)
 	{
-		takeoff_state_ = TrolleyTakeoffState::THROTTLE_RAMP;
+		// Alignment taxiing only helps the closed-loop path modes; heading hold follows the current
+		// yaw anyway and open loop cannot measure an alignment error.
+		const bool align_phase_enabled = param_trolley_aln_thr_.get() > FLT_EPSILON
+						 && (param_trolley_str_mode_.get() == TrolleySteeringMode::STEERING_PATH_TRACKING
+						     || param_trolley_str_mode_.get() == TrolleySteeringMode::STEERING_PATH_HEADING);
+
+		takeoff_state_ = align_phase_enabled ? TrolleyTakeoffState::ALIGN_TO_PATH : TrolleyTakeoffState::THROTTLE_RAMP;
 		initialized_ = true;
 		time_initialized_ = time_now;
 		takeoff_time_ = 0;
+		ramp_start_time_ = time_now;
 		time_last_steering_update_ = time_now;
+		release_condition_met_since_ = 0;
+		align_condition_met_since_ = 0;
 		trolley_link_healthy_ = true;
 		release_authorized_ = false;
 		bad_disconnect_detected_ = false;
@@ -65,7 +77,7 @@ namespace trolleytakeoff
 
 	void TrolleyTakeoff::update(const hrt_abstime &time_now, const float takeoff_airspeed, const float calibrated_airspeed,
 				    const float estimated_ground_speed, const float vehicle_altitude, const float clearance_altitude,
-				    const bool trolley_link_required, const bool trolley_link_healthy)
+				    const float path_heading_error, const bool trolley_link_required, const bool trolley_link_healthy)
 	{
 		updateLinkState(trolley_link_required, trolley_link_healthy);
 
@@ -95,8 +107,42 @@ namespace trolleytakeoff
 
 		switch (takeoff_state_)
 		{
+			case TrolleyTakeoffState::ALIGN_TO_PATH:
+				if (PX4_ISFINITE(path_heading_error)
+				    && fabsf(path_heading_error) < math::radians(math::max(param_trolley_aln_err_.get(), 1.f)))
+				{
+					if (align_condition_met_since_ == 0)
+					{
+						align_condition_met_since_ = time_now;
+					}
+
+					if ((time_now - align_condition_met_since_) >= kAlignConditionHoldTime)
+					{
+						takeoff_state_ = TrolleyTakeoffState::THROTTLE_RAMP;
+						ramp_start_time_ = time_now;
+						events::send(events::ID("trolley_takeoff_aligned"), events::Log::Info,
+							     "Trolley aligned with takeoff path, ramping throttle");
+					}
+
+				}
+
+				else
+				{
+					align_condition_met_since_ = 0;
+				}
+
+				if (takeoff_state_ == TrolleyTakeoffState::ALIGN_TO_PATH
+				    && (time_now - time_initialized_) > (math::max(param_trolley_aln_to_.get(), 1.f) * 1_s))
+				{
+					events::send(events::ID("trolley_takeoff_align_timeout"), events::Log::Critical,
+						     "Trolley path alignment timed out, aborting takeoff");
+					abort();
+				}
+
+				break;
+
 			case TrolleyTakeoffState::THROTTLE_RAMP:
-				if ((time_now - time_initialized_) > (param_trolley_ramp_time_.get() * 1_s))
+				if ((time_now - ramp_start_time_) > (param_trolley_ramp_time_.get() * 1_s))
 				{
 					takeoff_state_ = TrolleyTakeoffState::CLAMPED_TO_TROLLEY;
 				}
@@ -106,11 +152,31 @@ namespace trolleytakeoff
 			case TrolleyTakeoffState::CLAMPED_TO_TROLLEY:
 				if (releaseConditionReached(time_now, takeoff_airspeed, calibrated_airspeed, estimated_ground_speed))
 				{
-					takeoff_time_ = time_now;
-					takeoff_state_ = TrolleyTakeoffState::CLIMBOUT;
-					release_authorized_ = true;
-					events::send(events::ID("trolley_takeoff_release"), events::Log::Info,
-						     "Trolley takeoff release condition reached, climbout");
+					if (release_condition_met_since_ == 0)
+					{
+						release_condition_met_since_ = time_now;
+					}
+
+					// Speed-based conditions must hold for TROLLEY_RLS_HOLD so a single gust or
+					// estimation spike does not trigger rotation. The time condition stays exact.
+					const bool hold_time_elapsed = param_trolley_tk_cond_.get() == TrolleyTakeoffCondition::CONDITION_TIME
+								       || (time_now - release_condition_met_since_) >=
+								       (math::max(param_trolley_rls_hold_.get(), 0.f) * 1_s);
+
+					if (hold_time_elapsed)
+					{
+						takeoff_time_ = time_now;
+						takeoff_state_ = TrolleyTakeoffState::CLIMBOUT;
+						release_authorized_ = true;
+						events::send(events::ID("trolley_takeoff_release"), events::Log::Info,
+							     "Trolley takeoff release condition reached, climbout");
+					}
+
+				}
+
+				else
+				{
+					release_condition_met_since_ = 0;
 				}
 
 				break;
@@ -190,6 +256,22 @@ namespace trolleytakeoff
 	{
 		return takeoff_state_ < TrolleyTakeoffState::CLIMBOUT
 		       && param_trolley_str_mode_.get() == TrolleySteeringMode::STEERING_OPEN_LOOP;
+	}
+
+	bool TrolleyTakeoff::pathHeadingSteeringEnabled() const
+	{
+		return takeoff_state_ < TrolleyTakeoffState::CLIMBOUT
+		       && param_trolley_str_mode_.get() == TrolleySteeringMode::STEERING_PATH_HEADING;
+	}
+
+	bool TrolleyTakeoff::wheelControllerSteeringEnabled() const
+	{
+		return headingSteeringEnabled() || pathHeadingSteeringEnabled();
+	}
+
+	bool TrolleyTakeoff::navigationSteeringEnabled() const
+	{
+		return pathTrackingSteeringEnabled() || pathHeadingSteeringEnabled();
 	}
 
 	float TrolleyTakeoff::minimumTurnRadius() const
@@ -367,7 +449,9 @@ namespace trolleytakeoff
 				       && estimated_ground_speed > rotationGroundspeedThreshold(takeoff_airspeed);
 
 			case TrolleyTakeoffCondition::CONDITION_TIME:
-				return (time_now - time_initialized_) > (math::max(param_trolley_tk_time_.get(), 0.f) * 1_s);
+				// Measured from the throttle ramp start so a preceding alignment phase does not consume
+				// the configured test duration.
+				return (time_now - ramp_start_time_) > (math::max(param_trolley_tk_time_.get(), 0.f) * 1_s);
 
 			case TrolleyTakeoffCondition::CONDITION_AIRSPEED:
 			default:
@@ -390,24 +474,18 @@ namespace trolleytakeoff
 		return NAN;
 	}
 
-	float TrolleyTakeoff::getRoll() const
-	{
-		if (takeoff_state_ < TrolleyTakeoffState::CLIMBOUT)
-		{
-			return 0.0f;
-		}
-
-		return NAN;
-	}
-
 	float TrolleyTakeoff::getThrottle(const float idle_throttle) const
 	{
 		float throttle = idle_throttle;
 
 		switch (takeoff_state_)
 		{
+			case TrolleyTakeoffState::ALIGN_TO_PATH:
+				throttle = math::constrain(param_trolley_aln_thr_.get(), 0.f, param_trolley_max_thr_.get());
+				break;
+
 			case TrolleyTakeoffState::THROTTLE_RAMP:
-				throttle = interpolateValuesOverAbsoluteTime(idle_throttle, param_trolley_max_thr_.get(), time_initialized_,
+				throttle = interpolateValuesOverAbsoluteTime(idle_throttle, param_trolley_max_thr_.get(), ramp_start_time_,
 						param_trolley_ramp_time_.get());
 				break;
 
@@ -477,7 +555,10 @@ namespace trolleytakeoff
 		initialized_ = false;
 		takeoff_state_ = TrolleyTakeoffState::THROTTLE_RAMP;
 		takeoff_time_ = 0;
+		ramp_start_time_ = 0;
 		time_last_steering_update_ = 0;
+		release_condition_met_since_ = 0;
+		align_condition_met_since_ = 0;
 		trolley_link_healthy_ = true;
 		release_authorized_ = false;
 		bad_disconnect_detected_ = false;

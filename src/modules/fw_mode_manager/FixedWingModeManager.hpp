@@ -259,7 +259,8 @@ private:
 
 	enum TrolleyServoControl {
 		TROLLEY_SERVO_CONTROL_DIRECT = 0,
-		TROLLEY_SERVO_CONTROL_PICO = 1
+		TROLLEY_SERVO_CONTROL_PICO_SERIAL = 1,
+		TROLLEY_SERVO_CONTROL_PICO_I2C = 2
 	};
 
 	bool runwayTakeoffEnabled() const;
@@ -352,10 +353,18 @@ private:
 	static constexpr uint8_t TROLLEY_SERIAL_VERSION = 1;
 	static constexpr uint8_t TROLLEY_SERIAL_COMMAND_LEN = 13;
 	static constexpr uint8_t TROLLEY_SERIAL_STATUS_LEN = 8;
-	static constexpr uint8_t TROLLEY_SERIAL_MAX_SEQUENCE_LAG = 3;
+	// Allowed command-sequence age in the Pico status echo. One command is sent per mode-manager
+	// loop while the Pico reports at ~50 Hz, so a healthy echo already lags several sequence
+	// numbers at a 100-250 Hz loop rate. A broken PX4-to-Pico direction is caught primarily by the
+	// Pico command-fresh flag; this limit only needs to catch a stalled echo, which it does within
+	// a fraction of a second because the lag then grows by one per loop.
+	static constexpr uint8_t TROLLEY_SERIAL_MAX_SEQUENCE_LAG = 10;
 	static constexpr uint16_t TROLLEY_DEBUG_ID = 4242;
 	static constexpr hrt_abstime TROLLEY_DEBUG_INTERVAL = 100_ms;
 	static constexpr hrt_abstime TROLLEY_HEADING_OUTPUT_TIMEOUT = 100_ms;
+	// One command-write plus status-read exchange per period. 50 Hz keeps the shared I2C bus
+	// utilization low while staying far inside the Pico's 120 ms command-freshness timeout.
+	static constexpr hrt_abstime TROLLEY_I2C_EXCHANGE_INTERVAL = 20_ms;
 
 	int _trolley_serial_fd{-1};
 	uint8_t _trolley_serial_tx_seq{0};
@@ -365,6 +374,11 @@ private:
 	hrt_abstime _trolley_serial_last_open_attempt{0};
 	bool _trolley_serial_seen_status{false};
 	bool _trolley_serial_status_healthy{false};
+	bool _trolley_serial_conflict_warned{false};
+	class TrolleyPicoI2C *_trolley_pico_i2c{nullptr};
+	hrt_abstime _trolley_i2c_last_init_attempt{0};
+	hrt_abstime _trolley_i2c_last_exchange{0};
+	bool _trolley_was_armed{false};
 	landing_gear_wheel_s _trolley_heading_wheel_output{};
 	hrt_abstime _last_trolley_debug_publish{0};
 	Vector2f _trolley_debug_start_pos_local{NAN, NAN};
@@ -650,23 +664,32 @@ private:
 					 const float altitude_setpoint_amsl);
 
 	bool trolleyCommunicationEnabled() const;
+	bool trolleySerialModeEnabled() const;
+	bool trolleyI2CModeEnabled() const;
+	bool trolleyLinkTransportReady() const;
 	bool trolleyLinkHealthy(const hrt_abstime now) const;
 	const char *trolleySerialDevice() const;
 	int trolleySerialBaudrate() const;
-	void updateTrolleySerialLink(const hrt_abstime now);
+	bool trolleySerialPortInUseByOtherDriver() const;
+	void updateTrolleyLink(const hrt_abstime now);
 	bool openTrolleySerial(const hrt_abstime now);
 	void closeTrolleySerial();
+	bool initTrolleyI2C(const hrt_abstime now);
+	void closeTrolleyI2C();
+	void resetTrolleyLinkParserState();
 	void pollTrolleySerialStatus(const hrt_abstime now);
 	void parseTrolleySerialByte(const uint8_t byte, const hrt_abstime now);
-	void sendTrolleySerialCommand(const hrt_abstime now, const float steering_setpoint);
+	void sendTrolleyCommand(const hrt_abstime now, const float steering_setpoint, const bool force_now = false);
 	uint8_t trolleySerialChecksum(const uint8_t *buffer, const uint8_t length) const;
-	float trolleyHeadingWheelSetpoint(const hrt_abstime now);
-	bool trolleyPathTrackingNavigationValid() const;
+	float trolleyWheelControllerSetpoint(const hrt_abstime now);
+	uint8_t trolleyRunwayControlState() const;
+	bool trolleyPathNavigationValid() const;
+	void abortTrolleyTakeoffForInvalidSteeringConfiguration();
 	void abortTrolleyTakeoffForInvalidNavigation();
 	trolleytakeoff::TrolleyPathState trolleyPathState(const Vector2f &start_pos_local, const float takeoff_bearing,
 			const Vector2f &vehicle_pos) const;
-	void abortTrolleyTakeoffForPathTracking(const trolleytakeoff::TrolleyPathState &path_state,
-						const trolleytakeoff::TrolleyControlOutput &control_output);
+	void abortTrolleyTakeoffForPathControl(const trolleytakeoff::TrolleyPathState &path_state,
+			const trolleytakeoff::TrolleyControlOutput &control_output);
 	void publishTrolleyDebug(const hrt_abstime now, const Vector2f &start_pos_local, const float takeoff_bearing,
 				 const Vector2f &vehicle_pos, const Vector2f &ground_vel,
 				 const DirectionalGuidanceOutput &guidance, const float raw_wheel_setpoint,
@@ -985,6 +1008,8 @@ private:
 		(ParamInt<px4::params::TROLLEY_COM_PORT>) _param_trolley_com_port,
 		(ParamInt<px4::params::TROLLEY_COM_BAUD>) _param_trolley_com_baud,
 		(ParamFloat<px4::params::TROLLEY_COM_LOSS>) _param_trolley_com_loss,
+		(ParamInt<px4::params::TROLLEY_I2C_BUS>) _param_trolley_i2c_bus,
+		(ParamInt<px4::params::TROLLEY_I2C_ADDR>) _param_trolley_i2c_addr,
 
 		// external parameters
 		(ParamBool<px4::params::FW_USE_AIRSPD>) _param_fw_use_airspd,

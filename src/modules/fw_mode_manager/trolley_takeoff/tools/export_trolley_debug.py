@@ -68,6 +68,8 @@ FIELD_NAMES = [
     "longitudinal_speed_m_s",
     "minimum_cross_track_gain_1_m",
     "stability_condition_met",
+    "wheel_yaw_setpoint_rad",
+    "yaw_rate_feedforward_rad_s",
 ]
 
 ANGLE_FIELDS = [
@@ -80,6 +82,7 @@ ANGLE_FIELDS = [
     "path_heading_rad",
     "controller_heading_error_rad",
     "desired_yaw_offset_rad",
+    "wheel_yaw_setpoint_rad",
     "steering_feedforward_rad",
     "steering_feedback_rad",
     "steering_limit_rad",
