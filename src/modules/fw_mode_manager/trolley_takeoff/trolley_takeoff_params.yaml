@@ -390,7 +390,7 @@ parameters:
         long: |-
           External I2C bus used for the trolley Raspberry Pi Pico when TROLLEY_SRV_CTL is set to Raspberry Pi Pico I2C.
 
-          On the Pixhawk 6C, bus 1 is on the GPS1 connector and bus 2 on the GPS2 connector (SCL/SDA pins). Do not use bus 4: it carries the internal barometer and magnetometer. Prefer the external bus with the fewest flight-critical sensors, because a fault on the trolley stub disturbs every device on the shared bus until the connector separates.
+          On the Pixhawk 6C, bus 2 is on the dedicated 4-pin I2C port of current units and on the GPS2 connector SCL/SDA pins; bus 1 is on the GPS1 connector. Exception: 6C units with serial numbers up to pattern ...20221100 wire the dedicated port to bus 4 instead - verify with i2cdetect. Do not use bus 4: it carries the internal barometer and magnetometer. Prefer the external bus with the fewest flight-critical sensors, because a fault on the trolley stub disturbs every device on the shared bus until the connector separates.
       type: int32
       default: 2
       min: 1

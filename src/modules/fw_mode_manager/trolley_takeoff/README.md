@@ -6,7 +6,6 @@ This trolley takeoff mode keeps PX4 as the flight and trajectory controller whil
 - Raspberry Pi Pico control, where PX4 sends steering commands over the magnetic connector (UART or I2C) and the Pico drives the servos.
 
 In Raspberry Pi Pico mode, the Pico reports link health back to PX4 and slowly returns the wheels to center if the connector disconnects.
-
 ## Raspberry Pi Pico Safety Concept
 
 When `TROLLEY_SRV_CTL=1` (serial) or `2` (I2C), PX4 sends centered, inactive heartbeat commands while trolley takeoff is not running and active steering commands during trolley takeoff. The Pico sends status packets back (about 50 Hz on serial; on I2C, PX4 reads one back with every command exchange). PX4 only considers the link healthy when the Pico reports a fresh command and echoes a recent PX4 command sequence, so either broken link direction is detected.
@@ -34,35 +33,25 @@ The Pico does not independently follow a GPS path after disconnect. That is inte
 
 For direct Pixhawk PWM mode, connect the steering servo signal wires to Pixhawk PWM outputs and assign both outputs to Landing Gear Wheel in QGroundControl. Power the servos from the trolley battery/BEC and keep the Pixhawk, servo, and BEC grounds common.
 
-For Raspberry Pi Pico serial mode, connect the servos to the Pico and use the two reserved pogo pins for UART. The Pixhawk UART and Raspberry Pi Pico UART are both 3.3 V logic, so no logic level shifter is needed between them.
+For Raspberry Pi Pico control, connect the servos to the Pico and run the Pixhawk link over the data wires of the magnetic umbilical. Pixhawk and Pico are both 3.3 V logic on UART and I2C, so no level shifter is needed. This build uses the I2C link on the Pixhawk 6C's dedicated I2C port, because all its UART ports are already occupied; the serial link further below remains available as an alternative.
 
-### Raspberry Pi Pico Serial Wiring
+### Who Configures What
 
-```text
-Pixhawk TELEM2 TX  -> Pico GP1 / UART0 RX
-Pixhawk TELEM2 RX  <- Pico GP0 / UART0 TX
-Pixhawk GND        -> Pico GND / trolley battery ground
-```
+The two servo-control sources split the responsibilities differently. In Raspberry Pi Pico mode, QGroundControl never sees the steering servos: there is no actuator assignment and no pulse setup in QGC, only trolley parameters. All pulse calibration lives in the Pico sketch and is one-time - it only changes when a servo, the horn mounting, or the linkage changes.
 
-Recommended port: TELEM2 on Pixhawk 6C (JST-GH 6-pin: 1 VCC, 2 TX, 3 RX, 4 CTS, 5 RTS, 6 GND). Leave VCC, CTS, and RTS unconnected.
+| | Direct PWM (`TROLLEY_SRV_CTL=0`) | Pico link (`TROLLEY_SRV_CTL=1` or `2`, this build) |
+|---|---|---|
+| Servo signal wires connect to | Pixhawk PWM outputs | Pico GP14 (left) / GP15 (right) |
+| QGC actuator setup | Assign both outputs to Landing Gear Wheel | Nothing - leave Landing Gear Wheel unassigned |
+| Pulse center/min/max, direction | QGC output configuration (trim/min/max/reverse) | `k...Us` / `k...Reversed` constants in the sketch |
+| Linkage linearization | Not available | `kSteeringToServoMap` in the sketch |
+| What PX4 outputs | PWM pulses | Normalized steering command over I2C/UART |
+| `FW_W_EN` | `1` for every steering mode | `1` only for steering modes 0 and 3 |
+| Servo power | Trolley battery/BEC | Trolley battery/BEC (never from Pico or Pixhawk) |
 
-GPS2 works the same way with `TROLLEY_COM_PORT=4` (JST-GH 6-pin: 1 VCC, 2 TX, 3 RX, 4 SCL, 5 SDA, 6 GND — leave VCC and the I2C pins unconnected, or split the I2C pins off to a sensor; the buses are independent). Keep `GPS_2_CONFIG=0` so no GPS driver owns the port, and note that this spends the port normally used for a second GPS.
+### Raspberry Pi Pico I2C Wiring (used in this build)
 
-Magnetic breakaway umbilical, 5 wires:
-
-```text
-pin 1  GND
-pin 2  Pixhawk TX -> Pico GP1
-pin 3  GND
-pin 4  Pico GP0  -> Pixhawk RX
-pin 5  GND
-```
-
-The protocol only needs TX, RX, and GND; the spare wires are parallel grounds because contact resistance on magnetic pogo pins is the weak point. Put a ~330 ohm resistor in series with each TX line on both sides: with the symmetric pin layout a reversed mating then only swaps the data pins into a harmless, detectable link failure instead of driving two outputs against each other.
-
-### Raspberry Pi Pico I2C Wiring
-
-If no Pixhawk serial port is free, the same packets can run over I2C with `TROLLEY_SRV_CTL=2` and `TROLLEY_LINK_USE_I2C 1` in the Pico sketch. PX4 is the bus master, the Pico an I2C slave at `TROLLEY_I2C_ADDR` (default 0x3B) on `TROLLEY_I2C_BUS`:
+The link runs over I2C with `TROLLEY_SRV_CTL=2` and `TROLLEY_LINK_USE_I2C 1` in the Pico sketch. PX4 is the bus master, the Pico an I2C slave at `TROLLEY_I2C_ADDR` (default 0x3B) on `TROLLEY_I2C_BUS`:
 
 ```text
 Pixhawk SDA  <-> Pico GP0 / I2C0 SDA
@@ -70,7 +59,7 @@ Pixhawk SCL  <-> Pico GP1 / I2C0 SCL
 Pixhawk GND  <-> Pico GND / trolley battery ground
 ```
 
-On the Pixhawk 6C the dedicated 4-pin I2C port (1 VCC 5V, 2 SCL, 3 SDA, 4 GND) carries bus 2 — the same bus as the GPS2 connector pins 4/5 — so the default `TROLLEY_I2C_BUS=2` fits both hookups; leave the port's VCC pin unconnected. Exception per Holybro: 6C units with serial numbers up to pattern `...20221100` wire the dedicated port to bus 4 instead. Never put the trolley on bus 4: it carries the internal barometer and magnetometer, and a fault on the breakaway stub could take out both. On such an old unit use the GPS2 connector pins, which are bus 2 on all revisions. To verify, power the connected Pico and run `i2cdetect -b 2` in the MAVLink console: address 0x3b must appear.
+On the Pixhawk 6C the dedicated 4-pin I2C port (1 VCC 5V, 2 SCL, 3 SDA, 4 GND. Right to left like in says in the pixhawk documentation) carries bus 2 — the same bus as the GPS2 connector pins 4/5 — so the default `TROLLEY_I2C_BUS=2` fits both hookups; leave the port's VCC pin unconnected. Exception per Holybro: 6C units with serial numbers up to pattern `...20221100` wire the dedicated port to bus 4 instead. Never put the trolley on bus 4: it carries the internal barometer and magnetometer, and a fault on the breakaway stub could take out both. On such an old unit use the GPS2 connector pins, which are bus 2 on all revisions. To verify, power the connected Pico and run `i2cdetect -b 2` in the MAVLink console: address 0x3b must appear.
 
 Bus 1 is available on the GPS1 connector I2C pins as an alternative.
 
@@ -92,6 +81,28 @@ I2C-specific cautions:
 - `TROLLEY_I2C_ADDR` must not collide with any sensor on the same bus; command writes to a foreign device could misconfigure it. The default 0x3B avoids common PX4 sensor addresses.
 - PX4 exchanges one command/status pair every 20 ms; the same `TROLLEY_COM_LOSS` timeout and health flags apply as on the serial link. `TROLLEY_COM_PORT` and `TROLLEY_COM_BAUD` are unused in I2C mode.
 
+### Raspberry Pi Pico Serial Wiring (alternative, not used in this build)
+
+If a Pixhawk serial port is free, the same packets can run over UART instead: `TROLLEY_SRV_CTL=1`, `TROLLEY_LINK_USE_I2C 0` in the sketch, `TROLLEY_COM_PORT` selecting the port, and `TROLLEY_COM_BAUD` matching the sketch (115200). Make sure no other driver (MAVLink, GPS) owns the chosen port.
+
+```text
+Pixhawk TELEM2 TX  -> Pico GP1 / UART0 RX
+Pixhawk TELEM2 RX  <- Pico GP0 / UART0 TX
+Pixhawk GND        -> Pico GND / trolley battery ground
+```
+
+TELEM2 on the Pixhawk 6C (`TROLLEY_COM_PORT=1`, JST-GH 6-pin: 1 VCC, 2 TX, 3 RX, 4 CTS, 5 RTS, 6 GND) is the first choice; leave VCC, CTS, and RTS unconnected. On the same as-built umbilical the wires then carry:
+
+```text
+red    not connected
+black  not connected
+white  Pixhawk TX -> Pico GP1 (UART0 RX)
+green  Pico GP0 (UART0 TX) -> Pixhawk RX
+blue   GND
+```
+
+The protocol only needs TX, RX, and GND. With this wire order a reversed mating cannot drive two outputs against each other: the center wire (white) stays on itself and each TX lands on an unconnected wire, so the link just fails detectably. Optional hardening: series resistors (~330 ohm) in the data lines, and paralleling the unused red and black wires with ground, since pogo-pin contact resistance is the weak point.
+
 ### Raspberry Pi Pico Pin Map
 
 Physical pin numbers of every Pico pin this project uses. Pin 1 is the corner pin next to the USB connector; numbering runs down the USB-left edge (1-20) and back up the other edge (21-40). On the board, ground pins are the ones with square solder pads; all others are round.
@@ -110,6 +121,8 @@ Physical pin numbers of every Pico pin this project uses. Pin 1 is the corner pi
 
 All eight GND pins (3, 8, 13, 18, 23, 28, 33, 38) are connected together internally, so any of them works for any ground wire; pins 3 and 38 are simply the closest to the link pins and the power input.
 
+Note that the SDA and SCL wires cross once between the two connectors: the Pixhawk port orders them SCL then SDA, while the Pico orders them SDA (GP0) then SCL (GP1). This cannot be changed in software - the RP2040 silicon fixes the roles, with SDA only on even GPIOs and SCL only on odd ones. The crossing is normal and harmless; what must match is the signal, not the pin order: SDA to SDA (green wire at pogo-pin connection) and SCL to SCL (white wire at pogo-pin connection). If the link is dead on first power-up (`i2cdetect -b 2` shows nothing at 0x3b), an accidental SDA/SCL swap at one end is the first thing to check - it cannot cause damage.
+
 Power rules:
 
 - No power crosses the umbilical. The Pico and the servos run entirely from the trolley battery, so the Pico keeps centering the wheels after the connector separates.
@@ -119,14 +132,13 @@ Power rules:
 
 Important:
 
-- Pixhawk UART logic is 3.3 V.
-- Raspberry Pi Pico GPIO/UART logic is 3.3 V, matching the Pixhawk UART.
-- The sketch uses `Serial1` for the Pixhawk link and sets `Serial1` to Pico GP0/GP1.
+- Pixhawk and Pico data lines are both 3.3 V logic (UART and I2C alike). Never connect a 5 V pin (Pixhawk port VCC, Pico VBUS/VSYS) to any data line.
+- The sketch selects the link with `TROLLEY_LINK_USE_I2C`: `Wire`/I2C0 or `Serial1`/UART0, both on Pico GP0/GP1, so the umbilical wiring stays the same.
 - Keep `Serial`/USB free for programming and optional debugging.
 - Power the servos from the trolley battery/BEC, not from the Pixhawk.
 - Power the Pico from USB for bench tests, or from a regulated 5 V source into Pico VSYS/GND for standalone trolley use.
 - Connect all grounds together: Pixhawk signal ground, Pico ground, servo ground, and trolley battery/BEC ground.
-- Do not connect the Pixhawk PWM servo outputs to the trolley steering servos when `TROLLEY_SRV_CTL=1`. The Pico is the servo controller.
+- Do not connect the Pixhawk PWM servo outputs to the trolley steering servos when `TROLLEY_SRV_CTL=1` or `2`. The Pico is the servo controller.
 
 ## Raspberry Pi Pico Upload
 
@@ -162,6 +174,23 @@ static constexpr bool kRightReversed = false;
 ```
 
 Set each servo center so the wheels are straight. Then set min/max so the mechanical steering stops are not overdriven. If one wheel moves the wrong way, change the matching `k...Reversed` value.
+
+### Finding The Servo Pulse Values
+
+The servos are wired to the Pico, so QGC's actuator test cannot drive them. Instead the sketch has a built-in calibration mode over USB: connect the Pico to the laptop, power the servos from their BEC, open Tools - Serial Monitor in the Arduino IDE (115200 baud, newline line ending), and type:
+
+```text
+l 1520      set the left servo pulse to 1520 us
+r 1480      set the right servo pulse
+b 1500      set both
+s 0.5       command normalized steering through the map and calibration
+p           print current pulses and configured constants
+c           exit calibration, back to normal link/failsafe steering
+```
+
+Pulses are clamped to 800-2200 us. The first `l`/`r`/`b`/`s` command takes over from the link/failsafe steering until `c` or a power cycle, so never leave calibration active outside the bench.
+
+Procedure per servo: find the pulse where the wheel is exactly straight (`k...CenterUs`), then step in small increments toward each side until the wheel FIRST reaches the maximum steering angle and record those pulses as `k...MinUs`/`k...MaxUs`. Approach the ends slowly - near the linkage dead points a few microseconds of servo travel produce almost no wheel motion, and pushing past a dead point can jam the linkage or stall the servo. Write the recorded values into the constants, upload the sketch again, and verify the linearization with `s 0.5` / `s -0.5`: the wheel must stand at half the maximum angle on each side.
 
 ### Steering Linkage Linearization
 
@@ -330,7 +359,7 @@ Do these once when the trolley and UAV first come together, before any powered t
 5. Tilt test: with the UAV seated, tilt the loaded trolley sideways until the uphill wheels unload and note the angle. Set `TROLLEY_LAT_ACC` to at most half of `9.81 * tan(tilt angle)`.
 6. With the UAV seated, check the clearance between the propeller tip circle and the trolley front structure and wheels.
 7. Weigh the loaded trolley per axle if possible; the front-axle load determines the steering traction available on soft ground.
-8. Measure `TROLLEY_REF_X`: longitudinal distance from the rear axle forward to the flight controller position with the UAV seated.
+8. Measure `TROLLEY_REF_X`: horizontal distance from the rear axle forward to the PX4 position reference point with the UAV seated. With `EKF2_IMU_POS_*` and `EKF2_GPS_POS_*` set relative to the UAV center of gravity, that reference point is the CG — required for this airframe, because the Pixhawk sits in the tail behind the rear axle, and without the lever arms the reference would be the Pixhawk itself, giving a negative (unsupported) offset.
 
 ## Starting A Test
 

@@ -89,6 +89,18 @@ static constexpr int kSteeringMapPoints = sizeof(kSteeringToServoMap) / sizeof(k
 static_assert(kSteeringMapPoints >= 2, "Steering map needs at least two points");
 static_assert(kSteeringMapPoints % 2 == 1, "Steering map needs a center point (odd point count)");
 
+// Servo calibration over the USB serial monitor (bench use only, state clears on power cycle).
+// Commands: "l 1520" left servo pulse, "r 1480" right, "b 1500" both, "s 0.5" normalized
+// steering through the map and calibration, "p" print state, "c" back to normal operation.
+static constexpr int kCalibrationFloorUs = 800;
+static constexpr int kCalibrationCeilingUs = 2200;
+
+bool calibration_active = false;
+int calibration_left_us = 0;
+int calibration_right_us = 0;
+char calibration_line[24];
+uint8_t calibration_line_length = 0;
+
 Servo left_servo;
 Servo right_servo;
 
@@ -283,6 +295,117 @@ void onI2CRequest()
 }
 #endif
 
+void printCalibrationState()
+{
+	Serial.print(calibration_active ? "calibration ACTIVE (link steering overridden, 'c' to exit)"
+		     : "normal operation");
+	Serial.print(" | left ");
+	Serial.print(calibration_active ? calibration_left_us
+		     : servoPulseFromSteering(current_steering, kLeftMinUs, kLeftCenterUs, kLeftMaxUs, kLeftReversed));
+	Serial.print(" us, right ");
+	Serial.print(calibration_active ? calibration_right_us
+		     : servoPulseFromSteering(current_steering, kRightMinUs, kRightCenterUs, kRightMaxUs, kRightReversed));
+	Serial.print(" us | configured L ");
+	Serial.print(kLeftMinUs);
+	Serial.print("/");
+	Serial.print(kLeftCenterUs);
+	Serial.print("/");
+	Serial.print(kLeftMaxUs);
+	Serial.print(" R ");
+	Serial.print(kRightMinUs);
+	Serial.print("/");
+	Serial.print(kRightCenterUs);
+	Serial.print("/");
+	Serial.println(kRightMaxUs);
+}
+
+void startCalibrationFromCurrentOutput()
+{
+	if (!calibration_active) {
+		calibration_left_us = servoPulseFromSteering(current_steering, kLeftMinUs, kLeftCenterUs,
+					kLeftMaxUs, kLeftReversed);
+		calibration_right_us = servoPulseFromSteering(current_steering, kRightMinUs, kRightCenterUs,
+					kRightMaxUs, kRightReversed);
+		calibration_active = true;
+	}
+}
+
+int clampCalibrationPulse(const long pulse_us)
+{
+	if (pulse_us < kCalibrationFloorUs) {
+		return kCalibrationFloorUs;
+	}
+
+	if (pulse_us > kCalibrationCeilingUs) {
+		return kCalibrationCeilingUs;
+	}
+
+	return static_cast<int>(pulse_us);
+}
+
+void handleCalibrationLine(const char *line)
+{
+	const char command = line[0];
+
+	if (command == 'c') {
+		calibration_active = false;
+		Serial.println("calibration off, wheels return to link/failsafe steering");
+		return;
+	}
+
+	if (command == 'p') {
+		printCalibrationState();
+		return;
+	}
+
+	if (command == 'l' || command == 'r' || command == 'b') {
+		const int pulse = clampCalibrationPulse(strtol(line + 1, nullptr, 10));
+		startCalibrationFromCurrentOutput();
+
+		if (command != 'r') {
+			calibration_left_us = pulse;
+		}
+
+		if (command != 'l') {
+			calibration_right_us = pulse;
+		}
+
+		printCalibrationState();
+		return;
+	}
+
+	if (command == 's') {
+		const float steering = constrainSteering(strtof(line + 1, nullptr));
+		startCalibrationFromCurrentOutput();
+		calibration_left_us = servoPulseFromSteering(steering, kLeftMinUs, kLeftCenterUs, kLeftMaxUs,
+					kLeftReversed);
+		calibration_right_us = servoPulseFromSteering(steering, kRightMinUs, kRightCenterUs, kRightMaxUs,
+					kRightReversed);
+		printCalibrationState();
+		return;
+	}
+
+	Serial.println("commands: l/r/b <pulse us>, s <steering -1..1>, p print, c exit");
+}
+
+void pollCalibrationSerial()
+{
+	while (Serial.available() > 0) {
+		const char value = static_cast<char>(Serial.read());
+
+		if (value == '\n' || value == '\r') {
+			if (calibration_line_length > 0) {
+				calibration_line[calibration_line_length] = '\0';
+				handleCalibrationLine(calibration_line);
+				calibration_line_length = 0;
+			}
+
+		} else if (calibration_line_length < sizeof(calibration_line) - 1) {
+			calibration_line[calibration_line_length++] = value;
+		}
+	}
+}
+
 void setup()
 {
 	Serial.begin(115200);
@@ -305,10 +428,15 @@ void setup()
 
 	last_update_ms = millis();
 	writeServos(0.0f);
+
+	Serial.println("Trolley Pico servo controller ready.");
+	Serial.println("Calibration commands: l/r/b <pulse us>, s <steering -1..1>, p print, c exit");
 }
 
 void loop()
 {
+	pollCalibrationSerial();
+
 #if TROLLEY_LINK_USE_I2C
 
 	if (i2c_rx_pending) {
@@ -356,7 +484,15 @@ void loop()
 	const float slew_rate = failsafe_centering ? kFailsafeCenterSlewPerSecond : kCommandSlewPerSecond;
 
 	current_steering = slew(current_steering, desired_steering, slew_rate, dt);
-	writeServos(current_steering);
+
+	if (calibration_active) {
+		// Bench calibration overrides the link/failsafe steering until 'c' or a power cycle.
+		left_servo.writeMicroseconds(calibration_left_us);
+		right_servo.writeMicroseconds(calibration_right_us);
+
+	} else {
+		writeServos(current_steering);
+	}
 
 	if ((now_ms - last_status_ms) >= kStatusPeriodMs) {
 		last_status_ms = now_ms;
