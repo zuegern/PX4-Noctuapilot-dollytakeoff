@@ -43,6 +43,7 @@
 #include <parameters/param.h>
 #include <px4_platform_common/px4_config.h>
 #include <px4_platform_common/events.h>
+#include <lib/systemlib/mavlink_log.h>
 #include <uORB/topics/longitudinal_control_configuration.h>
 
 #if defined(CONFIG_I2C)
@@ -2074,7 +2075,9 @@ FixedWingModeManager::control_auto_takeoff(const hrt_abstime &now, const float c
 	const bool trolley_link_healthy = trolleyLinkHealthy(now);
 
 	if (trolley_takeoff_enabled || runway_takeoff_enabled) {
-		if (trolley_takeoff_enabled && !_trolley_takeoff.isInitialized()) {
+		const bool trolley_takeoff_initializing = trolley_takeoff_enabled && !_trolley_takeoff.isInitialized();
+
+		if (trolley_takeoff_initializing) {
 			_trolley_takeoff.init(now, trolley_link_required, trolley_link_healthy);
 			_runway_takeoff.reset();
 			_trolley_heading_wheel_output = {};
@@ -2110,13 +2113,29 @@ FixedWingModeManager::control_auto_takeoff(const hrt_abstime &now, const float c
 
 		// By default use the initial yaw, but follow the start-to-waypoint bearing for a mission takeoff.
 		float takeoff_bearing = _launch_current_yaw;
+		bool takeoff_bearing_from_waypoint = false;
 
 		if (_vehicle_status.nav_state == vehicle_status_s::NAVIGATION_STATE_AUTO_MISSION) {
 			const Vector2f takeoff_bearing_vector = takeoff_waypoint_local - start_pos_local;
 
 			if (takeoff_bearing_vector.norm() > FLT_EPSILON) {
 				takeoff_bearing = atan2f(takeoff_bearing_vector(1), takeoff_bearing_vector(0));
+				takeoff_bearing_from_waypoint = true;
 			}
+		}
+
+		// Announce which reference line the ground roll will actually track. Events do not reliably cross a
+		// lossy telemetry radio, so use STATUSTEXT. In Takeoff mode (not Mission) the reference is the compass
+		// heading at launch, not the drawn mission line; the operator must see this before pushing the trolley.
+		if (trolley_takeoff_initializing) {
+			float takeoff_bearing_deg = math::degrees(takeoff_bearing);
+
+			if (takeoff_bearing_deg < 0.f) {
+				takeoff_bearing_deg += 360.f;
+			}
+
+			mavlink_log_info(&_mavlink_log_pub, "Trolley path ref: %s %.0f deg",
+					 takeoff_bearing_from_waypoint ? "mission line" : "heading", (double)takeoff_bearing_deg);
 		}
 
 		trolleytakeoff::TrolleyPathState trolley_path_state{};

@@ -158,8 +158,23 @@ TrolleyControlOutput calculateTrolleyControl(const TrolleyPathState &path, const
 					     - atanf(config.cross_track_gain * path.error));
 	output.yaw_rate_feedforward = longitudinal_speed * path.curvature / radius_scale;
 
+	// Fade the closed-loop feedback in with longitudinal speed. At low speed the heading estimate is
+	// noisy and the steered wheels produce almost no yaw rate, so a fixed-gain command there only creates
+	// jitter (and a lurch once the trolley accelerates and the stored-up deflection suddenly bites). The
+	// geometric feedforward above is deliberately left unscaled so a curved reference is still tracked.
+	float feedback_speed_scale = 1.f;
+
+	if (PX4_ISFINITE(config.feedback_speed_full) && config.feedback_speed_full > FLT_EPSILON) {
+		const float speed_zero = (PX4_ISFINITE(config.feedback_speed_zero) && config.feedback_speed_zero > 0.f) ?
+					 config.feedback_speed_zero : 0.f;
+		const float speed_span = math::max(config.feedback_speed_full - speed_zero, FLT_EPSILON);
+		feedback_speed_scale = math::constrain((fabsf(longitudinal_speed) - speed_zero) / speed_span, 0.f, 1.f);
+	}
+
+	output.feedback_speed_scale = feedback_speed_scale;
+
 	// Negative heading/cross-track feedback with a smooth steering-angle saturation.
-	const float feedback_input = -config.heading_gain
+	const float feedback_input = -config.heading_gain * feedback_speed_scale
 				     * (output.heading_error + atanf(config.cross_track_gain * path.error));
 	output.feedback_angle = 2.f * output.steering_limit / M_PI_F
 				* atanf(M_PI_F * feedback_input / (2.f * output.steering_limit));

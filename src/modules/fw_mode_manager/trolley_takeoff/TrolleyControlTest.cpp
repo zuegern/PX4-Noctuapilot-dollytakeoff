@@ -79,6 +79,57 @@ TEST(TrolleyControl, StraightPathGeometryAndCorrection)
 	EXPECT_LT(calculateTrolleyControl(centered, 0.2f, 5.f, defaultConfig()).normalized_steering, 0.f);
 }
 
+TEST(TrolleyControl, FeedbackFadesWithLowSpeed)
+{
+	const TrolleyPathState right_of_path =
+		calculateStraightPathState(Vector2f{0.f, 0.f}, 0.f, Vector2f{5.f, 1.f});
+	ASSERT_TRUE(right_of_path.valid);
+	EXPECT_GT(right_of_path.error, 0.f);
+
+	// Disabled by default: an unset config applies full feedback at all speeds.
+	const TrolleyControlOutput unscaled = calculateTrolleyControl(right_of_path, 0.f, 0.3f, defaultConfig());
+	ASSERT_TRUE(unscaled.valid);
+	EXPECT_NEAR(unscaled.feedback_speed_scale, 1.f, 1.e-6f);
+	EXPECT_LT(unscaled.normalized_steering, 0.f);
+
+	TrolleyControlConfig config = defaultConfig();
+	config.feedback_speed_zero = 0.5f;
+	config.feedback_speed_full = 2.0f;
+
+	const TrolleyControlOutput slow = calculateTrolleyControl(right_of_path, 0.f, 0.3f, config);  // below zero speed
+	const TrolleyControlOutput mid = calculateTrolleyControl(right_of_path, 0.f, 1.25f, config);  // ramp midpoint
+	const TrolleyControlOutput fast = calculateTrolleyControl(right_of_path, 0.f, 3.0f, config);   // full authority
+
+	ASSERT_TRUE(slow.valid);
+	ASSERT_TRUE(mid.valid);
+	ASSERT_TRUE(fast.valid);
+
+	EXPECT_NEAR(slow.feedback_speed_scale, 0.f, 1.e-6f);
+	EXPECT_NEAR(mid.feedback_speed_scale, 0.5f, 1.e-6f);
+	EXPECT_NEAR(fast.feedback_speed_scale, 1.f, 1.e-6f);
+
+	// At/below the zero-speed threshold the closed-loop feedback is fully suppressed.
+	EXPECT_NEAR(slow.feedback_angle, 0.f, 1.e-6f);
+	EXPECT_NEAR(slow.normalized_steering, 0.f, 1.e-6f);
+
+	// Feedback magnitude grows monotonically with speed until full authority.
+	EXPECT_GT(fabsf(mid.feedback_angle), fabsf(slow.feedback_angle));
+	EXPECT_GT(fabsf(fast.feedback_angle), fabsf(mid.feedback_angle));
+
+	// The geometric feedforward is unaffected by the fade (zero for a straight line).
+	EXPECT_NEAR(fast.feedforward_angle, 0.f, 1.e-6f);
+
+	// feedback_speed_full == 0 disables the fade (this is what the alignment taxi passes so it keeps full
+	// steering authority at very low speed): full feedback even at 0.2 m/s.
+	TrolleyControlConfig align = defaultConfig();
+	align.feedback_speed_zero = 0.f;
+	align.feedback_speed_full = 0.f;
+	const TrolleyControlOutput align_slow = calculateTrolleyControl(right_of_path, 0.f, 0.2f, align);
+	ASSERT_TRUE(align_slow.valid);
+	EXPECT_NEAR(align_slow.feedback_speed_scale, 1.f, 1.e-6f);
+	EXPECT_GT(fabsf(align_slow.feedback_angle), 0.01f);
+}
+
 TEST(TrolleyControl, CircularPathUsesReferenceOffset)
 {
 	const float radius = 10.f;

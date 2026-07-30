@@ -264,8 +264,10 @@ parameters:
           Positive magnitude of the heading-error feedback used by direct closed-loop trolley path tracking.
 
           The controller applies the negative feedback sign internally. It must be greater than zero in direct closed-loop mode. Start with a low positive value and increase carefully during low-speed tests. This only applies when TROLLEY_STR_MODE is set to 1.
+
+          The default was lowered from 1.0 to 0.6 after RTK push tests showed the wheel command faithfully mirroring the natural yaw wobble of the hand-pushed trolley, producing jittery steering at near-unity gain.
       type: float
-      default: 1.0
+      default: 0.6
       min: 0.0
       max: 5.0
       decimal: 2
@@ -277,8 +279,10 @@ parameters:
           Converts signed cross-track error into a bounded heading correction for both closed-loop trolley path controllers.
 
           This gain has units of inverse metres. In direct closed-loop mode it must be greater than the sufficient constant-curvature stability threshold calculated from TROLLEY_WB, TROLLEY_REF_X, and TROLLEY_STR_MAX; PX4 aborts before release if that condition is not met. In PX4 PIFF path mode it sets the path-error-to-yaw correction, while yaw and yaw-rate control use FW_WR_P, FW_WR_I, FW_WR_FF, and FW_W_RMAX.
+
+          The default was lowered from 0.5 to 0.2 after RTK push tests: with cm-level position the trolley tracked the line to about +/-0.13 m even at 0.2, and the higher gain drove the steering close to saturation for only a few tenths of a metre of error, causing abrupt turns. This is still an order of magnitude above the stability threshold for the current trolley geometry.
       type: float
-      default: 0.5
+      default: 0.2
       min: 0.0
       max: 10.0
       decimal: 2
@@ -289,9 +293,11 @@ parameters:
         long: |-
           Optional lateral-acceleration limit for trolley steering.
 
-          When greater than zero, the steering-angle limit decreases with the estimated body-longitudinal speed to limit acceleration at the rear axle center. Both closed-loop path modes abort before release if the selected constant-radius path cannot satisfy this limit. Set to a negative value to disable until a safe trolley-specific limit has been measured.
+          When greater than zero, the steering-angle limit decreases with the estimated body-longitudinal speed to limit acceleration at the rear axle center. Both closed-loop path modes abort before release if the selected constant-radius path cannot satisfy this limit. Set to a negative value to disable.
+
+          Enabled by default at 2.5 m/s^2 (about 0.25 g) as an anti-tip limit: at higher taxi speeds a full steering deflection produces a hard lateral jerk that can tip the UAV or slide it off the trolley, so the steering angle is capped to keep the rear-axle lateral acceleration below this value. A straight reference path never triggers the pre-release abort; only an infeasibly tight commanded curve does. Raise once a trolley-specific tip limit has been measured.
       type: float
-      default: -1.0
+      default: 2.5
       unit: m/s^2
       min: -1.0
       max: 20.0
@@ -314,10 +320,41 @@ parameters:
     TROLLEY_STR_RATE:
       description:
         short: Trolley steering command slew rate
-        long: Limits how quickly the direct trolley steering command can change. Set to 0 or a negative value to disable.
+        long: |-
+          Limits how quickly the direct trolley steering command can change, in normalized units per second. Set to 0 or a negative value to disable.
+
+          The default was lowered from 1.0 to 0.4 (full-range sweep in about 5 s instead of 2 s) to mechanically smooth the wheel motion and reduce the risk of an abrupt turn tipping the UAV or sliding it off the trolley.
       type: float
-      default: 1.0
+      default: 0.4
       min: -1.0
+      max: 20.0
+      decimal: 2
+      increment: 0.1
+    TROLLEY_STR_VLO:
+      description:
+        short: Trolley steering feedback zero-authority speed
+        long: |-
+          Body-longitudinal speed at or below which the closed-loop path-steering feedback is faded to zero in direct closed-loop mode (TROLLEY_STR_MODE 1).
+
+          At very low speed the heading estimate is noisy and the steered wheels produce almost no yaw rate, so a fixed-gain command there only produces jitter and can store up a large deflection that lurches once the trolley accelerates. The geometric curvature feedforward is never faded, so a curved reference is still tracked. The feedback ramps linearly from zero at this speed to full authority at TROLLEY_STR_VHI. Set TROLLEY_STR_VHI to zero to disable the fade.
+      type: float
+      default: 0.5
+      unit: m/s
+      min: 0.0
+      max: 10.0
+      decimal: 2
+      increment: 0.1
+    TROLLEY_STR_VHI:
+      description:
+        short: Trolley steering feedback full-authority speed
+        long: |-
+          Body-longitudinal speed at or above which the closed-loop path-steering feedback reaches full authority in direct closed-loop mode (TROLLEY_STR_MODE 1).
+
+          Between TROLLEY_STR_VLO and this speed the feedback gain is scaled linearly from zero to one. Must be greater than TROLLEY_STR_VLO. Set to zero (or a non-positive value) to disable the speed-dependent fade and apply full feedback at all speeds.
+      type: float
+      default: 2.0
+      unit: m/s
+      min: 0.0
       max: 20.0
       decimal: 2
       increment: 0.1
@@ -349,7 +386,7 @@ parameters:
         0: Direct Pixhawk PWM
         1: Raspberry Pi Pico serial
         2: Raspberry Pi Pico I2C
-      default: 0
+      default: 1
       min: 0
       max: 2
     TROLLEY_COM_PORT:

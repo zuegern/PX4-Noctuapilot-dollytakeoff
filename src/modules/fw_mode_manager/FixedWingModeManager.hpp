@@ -382,6 +382,7 @@ private:
 	landing_gear_wheel_s _trolley_heading_wheel_output{};
 	hrt_abstime _last_trolley_debug_publish{0};
 	Vector2f _trolley_debug_start_pos_local{NAN, NAN};
+	orb_advert_t _mavlink_log_pub{nullptr};
 
 	bool _skipping_takeoff_detection{false};
 

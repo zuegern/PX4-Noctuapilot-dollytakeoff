@@ -367,6 +367,10 @@ namespace trolleytakeoff
 
 	TrolleyControlConfig TrolleyTakeoff::controlConfig() const
 	{
+		// The low-speed feedback fade (TROLLEY_STR_VLO/VHI) smooths the accelerating ground roll, but the
+		// alignment taxi deliberately runs below those speeds and must keep full steering authority to point
+		// the trolley onto the path before the ramp. So the fade is only applied once the throttle ramp begins.
+		const bool fade_low_speed_feedback = takeoff_state_ >= TrolleyTakeoffState::THROTTLE_RAMP;
 		return {
 			.wheelbase = param_trolley_wheelbase_.get(),
 			.reference_offset = param_trolley_ref_x_.get(),
@@ -374,6 +378,8 @@ namespace trolleytakeoff
 			.heading_gain = param_trolley_trk_gain_.get(),
 			.cross_track_gain = param_trolley_xtk_gain_.get(),
 			.max_lateral_acceleration = param_trolley_lat_acc_.get(),
+			.feedback_speed_zero = fade_low_speed_feedback ? param_trolley_str_vlo_.get() : 0.f,
+			.feedback_speed_full = fade_low_speed_feedback ? param_trolley_str_vhi_.get() : 0.f,
 		};
 	}
 

@@ -239,6 +239,8 @@ private:
 		(ParamFloat<px4::params::TROLLEY_LAT_ACC>) param_trolley_lat_acc_,
 		(ParamFloat<px4::params::TROLLEY_XTK_MAX>) param_trolley_xtk_max_,
 		(ParamFloat<px4::params::TROLLEY_STR_RATE>) param_trolley_str_rate_,
+		(ParamFloat<px4::params::TROLLEY_STR_VLO>) param_trolley_str_vlo_,
+		(ParamFloat<px4::params::TROLLEY_STR_VHI>) param_trolley_str_vhi_,
 		(ParamFloat<px4::params::TROLLEY_STR_HOLD>) param_trolley_str_hold_,
 		(ParamBool<px4::params::FW_W_EN>) param_fw_w_en_,
 		(ParamFloat<px4::params::FW_W_RMAX>) param_fw_w_rmax_

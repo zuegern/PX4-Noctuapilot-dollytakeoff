@@ -10,7 +10,7 @@
  * the UART link on Serial1 (TROLLEY_SRV_CTL=1). Both use the same packets.
  */
 
-#define TROLLEY_LINK_USE_I2C 1
+#define TROLLEY_LINK_USE_I2C 0
 
 #include <Servo.h>
 
@@ -51,16 +51,23 @@ static constexpr float kFailsafeCenterSlewPerSecond = 0.8f;
 static constexpr int kLeftServoPin = 14;  // Pico GP14
 static constexpr int kRightServoPin = 15; // Pico GP15
 
-// Calibrate these for your trolley. Values are servo PWM microseconds.
-static constexpr int kLeftMinUs = 1100;
-static constexpr int kLeftCenterUs = 1500;
-static constexpr int kLeftMaxUs = 1900;
-static constexpr bool kLeftReversed = false;
+// The Pico Servo library defaults attach(pin) to a conservative 1000-2000 us range and silently
+// clamps writeMicroseconds() to it, so pulses beyond 2000 do nothing. Attach with an explicit wide
+// range so the servo's full travel is reachable; the calibration clamp and the k...Us limits below
+// still bound what is actually commanded.
+static constexpr int kServoAttachMinUs = 800;
+static constexpr int kServoAttachMaxUs = 2200;
 
-static constexpr int kRightMinUs = 1100;
-static constexpr int kRightCenterUs = 1500;
-static constexpr int kRightMaxUs = 1900;
-static constexpr bool kRightReversed = false;
+// Calibrate these for your trolley. Values are servo PWM microseconds.     <----- !!!
+static constexpr int kLeftMinUs = 900;
+static constexpr int kLeftCenterUs = 1450;
+static constexpr int kLeftMaxUs = 1980;
+static constexpr bool kLeftReversed = true;
+
+static constexpr int kRightMinUs = 1070;
+static constexpr int kRightCenterUs = 1610;
+static constexpr int kRightMaxUs = 2100;
+static constexpr bool kRightReversed = true;
 
 static_assert(kLeftMinUs < kLeftCenterUs && kLeftCenterUs < kLeftMaxUs,
 	      "Left servo calibration must satisfy min < center < max");
@@ -76,13 +83,17 @@ static_assert(kRightMinUs < kRightCenterUs && kRightCenterUs < kRightMaxUs,
 //
 // Default: computed for the trolley linkage (crank 20 mm at O2(-100,0), coupler 60 mm, rocker
 // 115.2 mm at O4(-204.3,-59.3), neutral pointing +x), validated against the mechanism simulation.
-// Wheel -10 deg is first reached at crank -77 deg and +10 deg at crank +90 deg, so calibrate
-// kMin/Center/MaxUs to the pulses where the wheel FIRST reaches -10 / 0 / +10 degrees and verify
-// on the trolley (tire flex and linkage slop are not in this model).
+// This table is computed for a +/-9 deg wheel range: the servos are calibrated to stop at +/-9 deg,
+// just short of the +/-10 deg linkage dead points where the crank-to-wheel ratio diverges and the
+// servo stalls. Wheel -9 deg is reached at crank -60 deg and +9 deg at crank +69 deg, so calibrate
+// kMin/Center/MaxUs to the pulses where the wheel reaches -9 / 0 / +9 degrees, and set PX4
+// TROLLEY_STR_MAX = 9. Verify on the trolley (tire flex and linkage slop are not in this model).
+// For the full +/-10 deg range the table is
+// {-1.0f, -0.542f, -0.341f, -0.167f, 0.0f, 0.165f, 0.347f, 0.574f, 1.0f}.
 // For a plain linear servo-to-wheel setup use the identity table:
 // {-1.0f, -0.75f, -0.5f, -0.25f, 0.0f, 0.25f, 0.5f, 0.75f, 1.0f}
 static constexpr float kSteeringToServoMap[] = {
-	-1.0f, -0.602f, -0.379f, -0.186f, 0.0f, 0.165f, 0.347f, 0.574f, 1.0f
+	-1.0f, -0.679f, -0.435f, -0.215f, 0.0f, 0.192f, 0.402f, 0.649f, 1.0f
 };
 
 static constexpr int kSteeringMapPoints = sizeof(kSteeringToServoMap) / sizeof(kSteeringToServoMap[0]);
@@ -117,6 +128,22 @@ uint32_t last_status_ms = 0;
 uint32_t last_update_ms = 0;
 bool have_command = false;
 bool center_requested_by_px4 = false;
+
+// Link diagnostics, printed over the USB serial monitor. The USB link is independent of the
+// Pixhawk I2C/UART link, so this reports on that link while you wiggle or roll the trolley:
+// whether the Pico rebooted (power/firmware) versus kept running and only lost data
+// (data-line / pogo-pin problem), how many disconnects there were, and how long each lasted.
+void printLinkDiagnostics();
+
+bool g_fresh_boot = true;          // re-initialised to true on every power-up / reset
+bool diag_link_up = false;
+bool diag_ever_up = false;
+uint32_t diag_gap_start_cmd_ms = 0;
+uint32_t diag_loss_count = 0;
+uint32_t diag_longest_gap_ms = 0;
+uint32_t diag_total_down_ms = 0;
+uint32_t diag_last_ongoing_ms = 0;
+uint32_t diag_last_status_ms = 0;
 
 #if TROLLEY_LINK_USE_I2C
 // Written in the I2C receive interrupt, consumed in loop().
@@ -385,7 +412,12 @@ void handleCalibrationLine(const char *line)
 		return;
 	}
 
-	Serial.println("commands: l/r/b <pulse us>, s <steering -1..1>, p print, c exit");
+	if (command == 'd') {
+		printLinkDiagnostics();
+		return;
+	}
+
+	Serial.println("commands: l/r/b <pulse us>, s <steering -1..1>, p print, c exit, d link diagnostics");
 }
 
 void pollCalibrationSerial()
@@ -406,6 +438,102 @@ void pollCalibrationSerial()
 	}
 }
 
+void printLinkDiagnostics()
+{
+	const uint32_t now = millis();
+	const bool up = have_command && (now - last_command_ms) <= kCommandTimeoutMs;
+	Serial.print("[diag] uptime ");
+	Serial.print(now / 1000.0f, 1);
+	Serial.print("s | link ");
+	Serial.print(up ? "UP" : "DOWN");
+
+	if (!up && diag_ever_up) {
+		Serial.print(" for ");
+		Serial.print(now - diag_gap_start_cmd_ms);
+		Serial.print(" ms");
+	}
+
+	Serial.print(" | disconnects ");
+	Serial.print(diag_loss_count);
+	Serial.print(" | longest ");
+	Serial.print(diag_longest_gap_ms);
+	Serial.print(" ms | total down ");
+	Serial.print(diag_total_down_ms);
+	Serial.print(" ms | last cmd seq ");
+	Serial.println(last_command_sequence);
+}
+
+// Watches command freshness and reports link losses/recoveries over USB serial. Because it runs
+// only while the Pico is powered, its continued output during a Pixhawk-link drop proves the Pico
+// stayed alive (so the loss is a data-line/pogo-pin fault, not power). A gap is timed exactly from
+// the last good command to the next one, and classified GOOD once it reconnects.
+void updateLinkDiagnostics(const uint32_t now_ms)
+{
+	// Only emit when a USB serial monitor is attached; nothing is buffered otherwise.
+	if (!static_cast<bool>(Serial)) {
+		return;
+	}
+
+	const bool up = have_command && (now_ms - last_command_ms) <= kCommandTimeoutMs;
+
+	if (!diag_ever_up) {
+		if (up) {
+			diag_ever_up = true;
+			diag_link_up = true;
+			diag_last_status_ms = now_ms;
+			Serial.println("[diag] LINK UP (first command received)");
+		}
+
+		return;
+	}
+
+	if (diag_link_up && !up) {
+		diag_link_up = false;
+		diag_gap_start_cmd_ms = last_command_ms;
+		diag_loss_count++;
+		diag_last_ongoing_ms = now_ms;
+		Serial.print("[diag] LINK LOST @ ");
+		Serial.print(now_ms / 1000.0f, 1);
+		Serial.print("s  (disconnect #");
+		Serial.print(diag_loss_count);
+		Serial.println(")");
+
+	} else if (!diag_link_up && up) {
+		diag_link_up = true;
+		const uint32_t gap = last_command_ms - diag_gap_start_cmd_ms;
+		diag_total_down_ms += gap;
+
+		if (gap > diag_longest_gap_ms) {
+			diag_longest_gap_ms = gap;
+		}
+
+		Serial.print("[diag] LINK RECOVERED after ");
+		Serial.print(gap);
+		Serial.print(" ms  -> GOOD (reconnected).  longest so far ");
+		Serial.print(diag_longest_gap_ms);
+		Serial.println(" ms");
+	}
+
+	if (!diag_link_up) {
+		if ((now_ms - diag_last_ongoing_ms) >= 500) {
+			diag_last_ongoing_ms = now_ms;
+			Serial.print("[diag]   ...still disconnected ");
+			Serial.print(now_ms - diag_gap_start_cmd_ms);
+			Serial.println(" ms  (BAD if it never comes back)");
+		}
+
+	} else if ((now_ms - diag_last_status_ms) >= 2000) {
+		diag_last_status_ms = now_ms;
+		Serial.print("[diag] link UP  uptime ");
+		Serial.print(now_ms / 1000.0f, 1);
+		Serial.print("s  disconnects ");
+		Serial.print(diag_loss_count);
+		Serial.print("  longest ");
+		Serial.print(diag_longest_gap_ms);
+		Serial.println(" ms");
+	}
+}
+
 void setup()
 {
 	Serial.begin(115200);
@@ -423,18 +551,37 @@ void setup()
 	PixhawkSerial.begin(115200);
 #endif
 
-	left_servo.attach(kLeftServoPin);
-	right_servo.attach(kRightServoPin);
+	left_servo.attach(kLeftServoPin, kServoAttachMinUs, kServoAttachMaxUs);
+	right_servo.attach(kRightServoPin, kServoAttachMinUs, kServoAttachMaxUs);
 
 	last_update_ms = millis();
 	writeServos(0.0f);
-
-	Serial.println("Trolley Pico servo controller ready.");
-	Serial.println("Calibration commands: l/r/b <pulse us>, s <steering -1..1>, p print, c exit");
 }
 
 void loop()
 {
+	// Greet whenever a serial monitor (re)connects; a boot-time print would be dropped
+	// because USB serial output goes nowhere until the host opens the port.
+	static bool serial_monitor_was_connected = false;
+	const bool serial_monitor_connected = static_cast<bool>(Serial);
+
+	if (serial_monitor_connected && !serial_monitor_was_connected) {
+		if (g_fresh_boot) {
+			g_fresh_boot = false;
+			Serial.println("===== TROLLEY PICO BOOTED (fresh power-up / reset) =====");
+			Serial.println("[diag] If this BOOTED banner reappears during a test, the Pico REBOOTED (power/firmware).");
+			Serial.println("[diag] If the link drops but [diag] keeps printing, the Pico is alive -> data-line/pogo fault.");
+
+		} else {
+			Serial.println("(serial monitor reconnected - Pico did NOT reboot)");
+		}
+
+		Serial.println("Trolley Pico servo controller ready.");
+		Serial.println("Commands: l/r/b <us>, s <steering>, p print, c exit  |  d = link diagnostics");
+	}
+
+	serial_monitor_was_connected = serial_monitor_connected;
+
 	pollCalibrationSerial();
 
 #if TROLLEY_LINK_USE_I2C
@@ -498,4 +645,6 @@ void loop()
 		last_status_ms = now_ms;
 		publishStatus(command_fresh, failsafe_centering);
 	}
+
+	updateLinkDiagnostics(now_ms);
 }

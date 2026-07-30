@@ -55,6 +55,10 @@ struct TrolleyControlConfig {
 	float heading_gain{NAN};
 	float cross_track_gain{NAN};
 	float max_lateral_acceleration{NAN};
+	// Longitudinal speed [m/s] at or below which the closed-loop steering feedback is faded to zero, and
+	// the speed at which it reaches full authority. Leave non-finite / non-positive to disable the fade.
+	float feedback_speed_zero{NAN};
+	float feedback_speed_full{NAN};
 };
 
 struct TrolleyControlOutput {
@@ -68,6 +72,7 @@ struct TrolleyControlOutput {
 	float desired_yaw{NAN};
 	float yaw_rate_feedforward{NAN};
 	float minimum_cross_track_gain{NAN};
+	float feedback_speed_scale{NAN}; // [0,1] speed-dependent scaling applied to the closed-loop feedback
 	bool path_feasible{false};
 	bool stability_condition_met{false};
 	bool valid{false};

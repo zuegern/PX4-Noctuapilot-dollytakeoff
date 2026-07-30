@@ -186,11 +186,42 @@ b 1500      set both
 s 0.5       command normalized steering through the map and calibration
 p           print current pulses and configured constants
 c           exit calibration, back to normal link/failsafe steering
+d           print link-connection diagnostics (see "Link Connection Diagnostics" below)
 ```
 
 Pulses are clamped to 800-2200 us. The first `l`/`r`/`b`/`s` command takes over from the link/failsafe steering until `c` or a power cycle, so never leave calibration active outside the bench.
 
 Procedure per servo: find the pulse where the wheel is exactly straight (`k...CenterUs`), then step in small increments toward each side until the wheel FIRST reaches the maximum steering angle and record those pulses as `k...MinUs`/`k...MaxUs`. Approach the ends slowly - near the linkage dead points a few microseconds of servo travel produce almost no wheel motion, and pushing past a dead point can jam the linkage or stall the servo. Write the recorded values into the constants, upload the sketch again, and verify the linearization with `s 0.5` / `s -0.5`: the wheel must stand at half the maximum angle on each side.
+
+### Link Connection Diagnostics
+
+The sketch also reports on the Pixhawk link over the same USB serial monitor. That monitor is independent of the I2C/UART link, so it keeps working even while that link is failing - it is the tool for finding an intermittent connection (for example a marginal pogo-pin contact) and for telling a data-line fault apart from a Pico power loss or reset.
+
+On every power-up or reset the Pico prints a boot banner:
+
+```text
+===== TROLLEY PICO BOOTED (fresh power-up / reset) =====
+```
+
+While running it prints link events. A disconnect is registered when no valid command arrives for longer than the 120 ms command timeout, and the reported duration is the exact gap between good commands:
+
+```text
+[diag] LINK UP (first command received)
+[diag] LINK LOST @ 12.4s  (disconnect #3)
+[diag]   ...still disconnected 640 ms  (BAD if it never comes back)
+[diag] LINK RECOVERED after 780 ms  -> GOOD (reconnected).  longest so far 780 ms
+[diag] link UP  uptime 20.0s  disconnects 3  longest 780 ms
+```
+
+Type `d` at any time for a one-line summary: uptime, link state, total disconnects, longest and total downtime, and the last command sequence.
+
+Interpreting it during a wiggle or roll test:
+
+- The `[diag]` lines keep printing through the drop (LINK LOST, then still disconnected, then RECOVERED): the Pico stayed powered, so the fault is the data line or connector (pogo pins), not power. `RECOVERED after X ms` is exactly how long the connection was lost; `GOOD` means it reconnected, while an ongoing `...still disconnected` means it stayed down (BAD).
+- The BOOTED banner reappears: the Pico rebooted - a power brownout/disconnect or a firmware reset - not a data-line glitch.
+- `(serial monitor reconnected - Pico did NOT reboot)` prints when you just reopen the monitor, so a reopened monitor is never mistaken for a reset.
+
+PX4 sends centered heartbeat commands whenever it is powered and set to a Pico link, so the diagnostics work without arming: power both ends, open the monitor, and wiggle the connection to see the disconnects and their durations.
 
 ### Steering Linkage Linearization
 
@@ -267,11 +298,13 @@ TROLLEY_RADIUS             # Reference-point turn radius
 TROLLEY_WB                 # Trolley wheelbase
 TROLLEY_REF_X              # Forward offset from rear axle to PX4 reference point
 TROLLEY_STR_MAX            # Physical wheel angle limit, not servo horn angle
-TROLLEY_TRK_GAIN           # Mode 1 heading-error feedback magnitude
-TROLLEY_XTK_GAIN           # Modes 1 and 3 cross-track feedback gain [1/m]
+TROLLEY_TRK_GAIN           # Mode 1 heading-error feedback magnitude (default 0.6)
+TROLLEY_XTK_GAIN           # Modes 1 and 3 cross-track feedback gain [1/m] (default 0.2)
 TROLLEY_XTK_MAX            # Pre-release cross-track abort limit
-TROLLEY_LAT_ACC            # Speed-dependent lateral-acceleration limit; -1 disables
-TROLLEY_STR_RATE           # PX4 command slew rate before sending to the Pico
+TROLLEY_LAT_ACC            # Speed-dependent lateral-acceleration (anti-tip) limit; default 2.5 m/s^2, -1 disables
+TROLLEY_STR_RATE           # PX4 command slew rate before sending to the Pico (default 0.4/s)
+TROLLEY_STR_VLO            # Mode 1 speed at/below which the closed-loop feedback fades to zero [m/s]
+TROLLEY_STR_VHI            # Mode 1 speed at/above which the closed-loop feedback reaches full authority [m/s]
 TROLLEY_STR_HOLD           # Minimum neutral-steering time after release
 
 TROLLEY_ALN_THR            # Alignment taxi throttle; 0 disables the alignment phase
@@ -283,9 +316,15 @@ TROLLEY_ALN_TO             # Alignment timeout before aborting takeoff
 
 For a mission takeoff, the reference path direction is the bearing from the start position to the takeoff waypoint, which the trolley on the ground usually does not match exactly. With `TROLLEY_ALN_THR > 0`, the closed-loop path modes 1 and 3 therefore begin with an alignment taxi phase, following the same low-speed-alignment practice used by automatic-taxi systems for fixed-wing aircraft (Zammit and Zammit-Mangion, 2014, in the references below): PX4 drives the trolley at the configured taxi throttle and steers with full authority until the path heading error stays below `TROLLEY_ALN_ERR` for half a second. It then re-anchors the path at the aligned position, so the alignment arc does not count as cross-track error, and starts the normal throttle ramp. The cross-track abort limit `TROLLEY_XTK_MAX` only applies after alignment; if the trolley cannot align within `TROLLEY_ALN_TO`, takeoff aborts.
 
+The taxi throttle is capped by `TROLLEY_MAX_THR` (`throttle = min(TROLLEY_ALN_THR, TROLLEY_MAX_THR)`), so `TROLLEY_MAX_THR` must be greater than zero for the phase to move the trolley at all — a pure hand-push test with `TROLLEY_MAX_THR=0` cannot taxi itself, so align the trolley by hand instead and leave `TROLLEY_ALN_THR=0`. The low-speed feedback fade (`TROLLEY_STR_VLO`/`TROLLEY_STR_VHI`) is suspended during this phase so the wheels keep full steering authority to turn the trolley onto the line even at walking pace. Because the UAV motor supplies the forward force, its thrust also presses the airframe forward into the trolley's front retention, coupling the two so the UAV yaws together with the trolley: the trolley's steered wheels, not the UAV, set the direction. For this to hold, the retention must constrain the UAV in yaw, and `TROLLEY_ALN_THR` must be high enough both to seat the airframe against the retention and to actually roll the loaded trolley (overcome rolling resistance and tire scrub), not merely press the UAV forward while the trolley stays put.
+
+The takeoff waypoint only defines the line direction, not a lift-off location: release is triggered by `TROLLEY_TK_COND` (airspeed, groundspeed, or time), not by reaching the waypoint, and the path is re-anchored at the aligned position. So the UAV lifts off wherever it reaches the release condition along the line — typically some metres short of the waypoint — and the few metres the assembly travels during alignment do not shift where takeoff happens or bend the line.
+
+To follow the exact geographic line to a takeoff point (not left, not right), run it as a **Mission** with the takeoff waypoint placed at the far end of that line and start the mission, so `nav_state` is `AUTO_MISSION`. In **Takeoff** mode (`AUTO_TAKEOFF`) the reference is instead the compass heading at launch and the takeoff setpoint is placed in-place, so the drawn mission line is ignored. To make this unambiguous, at takeoff start PX4 emits a STATUSTEXT `Trolley path ref: mission line <deg>` or `Trolley path ref: heading <deg>` (STATUSTEXT rather than an event, so it crosses a lossy telemetry radio) - confirm it reads `mission line` before pushing if you intend to track the drawn path.
+
 In Takeoff mode (not Mission), the reference bearing is the heading at takeoff start, so the alignment phase completes after its half-second check and only adds a short taxi. Heading-hold and open-loop modes skip the phase entirely. The heading estimate used for alignment comes from the EKF (magnetometer, plus GPS course once moving), so check in QGroundControl that the displayed heading matches the real trolley direction before starting — steel, servo wiring, and the trolley battery can distort the magnetometer.
 
-Mode 1 uses path curvature as direct steering feedforward and adds bounded heading/cross-track feedback. Mode 3 instead converts the same path geometry into yaw and yaw-rate references for PX4's existing PIFF wheel controller. `TROLLEY_REF_X` compensates for the PX4 position reference being ahead of the rear axle and must be nonnegative. The Qin-Li sufficient constant-curvature stability check applies only to mode 1. Both closed-loop modes require valid navigation and enforce `TROLLEY_XTK_MAX`, steering feasibility, and the optional lateral-acceleration limit. Leave `TROLLEY_LAT_ACC=-1` until a safe trolley-specific limit has been measured.
+Mode 1 uses path curvature as direct steering feedforward and adds bounded heading/cross-track feedback. The feedback (not the feedforward) is faded in with body-longitudinal speed between `TROLLEY_STR_VLO` and `TROLLEY_STR_VHI`, because at very low speed the heading estimate is noisy and the steered wheels produce almost no yaw rate, so a fixed-gain command there only jitters and can store up a deflection that lurches once the trolley accelerates. This fade is suspended during the alignment taxi (state `ALIGN_TO_PATH`), where full low-speed authority is needed, and applies from the throttle ramp onward. Mode 3 instead converts the same path geometry into yaw and yaw-rate references for PX4's existing PIFF wheel controller. `TROLLEY_REF_X` compensates for the PX4 position reference being ahead of the rear axle and must be nonnegative. The Qin-Li sufficient constant-curvature stability check applies only to mode 1. Both closed-loop modes require valid navigation and enforce `TROLLEY_XTK_MAX`, steering feasibility, and the lateral-acceleration limit. `TROLLEY_LAT_ACC` now defaults to 2.5 m/s^2 (about 0.25 g) as an anti-tip cap; measure the trolley tilt limit (see the checklist step below) and adjust before higher-speed runs, or set -1 to disable.
 
 Direct-PWM wheel control remains enabled beyond `TROLLEY_STR_HOLD` when necessary for the slew-limited command to finish reaching center.
 
@@ -297,11 +336,12 @@ Mode 1 follows the offset-reference kinematic bicycle controller proposed by Qin
 delta_ff = atan(L * kappa / sqrt(1 - (d * kappa)^2))
 theta_0  = -asin(d * kappa)
 theta_e  = wrap_pi(psi - psi_D - theta_0)
-delta_fb = g(-K_heading * (theta_e + atan(K_cross * e)))
+s_V      = constrain((|V| - TROLLEY_STR_VLO) / (TROLLEY_STR_VHI - TROLLEY_STR_VLO), 0, 1)
+delta_fb = g(-K_heading * s_V * (theta_e + atan(K_cross * e)))
 delta    = constrain(delta_ff + delta_fb, -delta_limit, delta_limit)
 ```
 
-Here, `e` is the signed cross-track error and `g` is the smooth bounded arctangent wrapper from the paper. The selected path is either a straight line (`kappa=0`) or a constant-radius circle (`kappa=+/-1/R`). Open-loop mode uses only `delta_ff`; it cannot correct disturbances or initial path error.
+Here, `e` is the signed cross-track error, `V` is the body-longitudinal speed, and `g` is the smooth bounded arctangent wrapper from the paper. `s_V` is the speed fade described above; it scales only the feedback, so the geometric feedforward `delta_ff` still tracks a curved reference at any speed. Setting `TROLLEY_STR_VHI<=0` disables the fade (`s_V=1`). The selected path is either a straight line (`kappa=0`) or a constant-radius circle (`kappa=+/-1/R`). Open-loop mode uses only `delta_ff`; it cannot correct disturbances or initial path error.
 
 When `TROLLEY_LAT_ACC` is enabled, `delta_limit` is reduced using the estimated body-longitudinal speed `V`:
 
