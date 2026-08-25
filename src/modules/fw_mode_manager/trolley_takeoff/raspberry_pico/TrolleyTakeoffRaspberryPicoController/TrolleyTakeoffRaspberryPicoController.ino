@@ -59,6 +59,16 @@ static constexpr int kServoAttachMinUs = 800;
 static constexpr int kServoAttachMaxUs = 2200;
 
 // Calibrate these for your trolley. Values are servo PWM microseconds.     <----- !!!
+//
+// STEERING DIRECTION -- do not lose this again. kLeftReversed / kRightReversed set which way each
+// servo turns. They must be chosen so that a POSITIVE command steers the trolley to the RIGHT.
+// After ANY servo rewire, pin change, or re-upload, VERIFY on the serial console before driving:
+//     s 0     -> both wheels straight
+//     s 0.5   -> both wheels steer the trolley RIGHT (moving together, not fighting)
+//     s -0.5  -> LEFT, roughly symmetric to s 0.5
+// If s 0.5 goes the wrong way, flip BOTH flags below (true <-> false), re-upload, and re-check.
+// Change ONE thing at a time (wiring OR flags, never both in the same step) or you will double-reverse.
+// Upload THIS file (the copy in the PX4 repo) -- not a separate Arduino sketchbook copy, or edits get lost.
 static constexpr int kLeftMinUs = 900;
 static constexpr int kLeftCenterUs = 1450;
 static constexpr int kLeftMaxUs = 1980;
