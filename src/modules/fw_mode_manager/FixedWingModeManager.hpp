@@ -379,6 +379,8 @@ private:
 	hrt_abstime _trolley_i2c_last_init_attempt{0};
 	hrt_abstime _trolley_i2c_last_exchange{0};
 	bool _trolley_was_armed{false};
+	hrt_abstime _trolley_heading_offset_since{0};
+	bool _trolley_heading_warned{false};
 	landing_gear_wheel_s _trolley_heading_wheel_output{};
 	hrt_abstime _last_trolley_debug_publish{0};
 	Vector2f _trolley_debug_start_pos_local{NAN, NAN};
@@ -687,6 +689,7 @@ private:
 	bool trolleyPathNavigationValid() const;
 	void abortTrolleyTakeoffForInvalidSteeringConfiguration();
 	void abortTrolleyTakeoffForInvalidNavigation();
+	void warnTrolleyHeadingInconsistent(const hrt_abstime now);
 	trolleytakeoff::TrolleyPathState trolleyPathState(const Vector2f &start_pos_local, const float takeoff_bearing,
 			const Vector2f &vehicle_pos) const;
 	void abortTrolleyTakeoffForPathControl(const trolleytakeoff::TrolleyPathState &path_state,
@@ -1011,6 +1014,7 @@ private:
 		(ParamFloat<px4::params::TROLLEY_COM_LOSS>) _param_trolley_com_loss,
 		(ParamInt<px4::params::TROLLEY_I2C_BUS>) _param_trolley_i2c_bus,
 		(ParamInt<px4::params::TROLLEY_I2C_ADDR>) _param_trolley_i2c_addr,
+		(ParamFloat<px4::params::TROLLEY_HDG_CHK>) _param_trolley_hdg_chk,
 
 		// external parameters
 		(ParamBool<px4::params::FW_USE_AIRSPD>) _param_fw_use_airspd,

@@ -358,6 +358,32 @@ parameters:
       max: 20.0
       decimal: 2
       increment: 0.1
+    TROLLEY_ITK_GAIN:
+      description:
+        short: Trolley cross-track integral gain
+        long: |-
+          Integral gain on the cross-track error for direct closed-loop path tracking (TROLLEY_STR_MODE 1). The proportional controller alone settles the trolley at a fixed offset whenever the heading estimate is biased (offset is roughly the heading error divided by TROLLEY_XTK_GAIN); integrating the RTK cross-track error removes that residual so the run tracks the true line.
+
+          It only accumulates during the throttle-ramp and clamped roll (never during the alignment taxi, which deliberately leaves the line), fades in with speed like the rest of the feedback, and is bounded by TROLLEY_ITK_LIM. Start at zero and raise slowly on the bench: this term is not part of the published proportional stability condition, so too high a value can cause slow weave or overshoot. A value near 0.02 removes a few-degree heading bias over a typical ground roll. Set to zero to disable the integrator.
+      type: float
+      default: 0.0
+      unit: norm
+      min: 0.0
+      max: 0.5
+      decimal: 3
+      increment: 0.005
+    TROLLEY_ITK_LIM:
+      description:
+        short: Trolley cross-track integral limit
+        long: |-
+          Anti-windup clamp on the cross-track integrator (TROLLEY_ITK_GAIN), expressed as the maximum heading-equivalent steering correction the integrator may contribute. It bounds how much steady heading bias the integrator can cancel and prevents a stuck estimate or a saturated command from winding it up.
+      type: float
+      default: 10.0
+      unit: deg
+      min: 0.0
+      max: 45.0
+      decimal: 1
+      increment: 0.5
     TROLLEY_STR_HOLD:
       description:
         short: Trolley straight steering hold time
@@ -455,3 +481,17 @@ parameters:
       max: 1.0
       decimal: 2
       increment: 0.01
+    TROLLEY_HDG_CHK:
+      description:
+        short: Trolley heading-vs-ground-track warning threshold
+        long: |-
+          During the trolley ground roll PX4 compares the estimated heading (yaw) with the GPS ground track once the trolley is clearly moving. If the two disagree by more than this angle for about a second, PX4 sends a status warning to the operator that the heading estimate is unsettled and the run is likely to drift off the intended line.
+
+          This catches the dominant error on a vehicle without a magnetometer: right after a calibration or reboot the heading has to re-converge from GPS motion, so the first run or two can steer to a heading that is a few degrees off even though the estimate reports valid. The check is a warning only, it does not abort the run. Set to zero to disable it.
+      type: float
+      default: 5.0
+      unit: deg
+      min: 0.0
+      max: 45.0
+      decimal: 1
+      increment: 0.5

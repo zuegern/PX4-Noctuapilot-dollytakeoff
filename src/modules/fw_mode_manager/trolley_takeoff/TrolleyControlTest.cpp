@@ -130,6 +130,55 @@ TEST(TrolleyControl, FeedbackFadesWithLowSpeed)
 	EXPECT_GT(fabsf(align_slow.feedback_angle), 0.01f);
 }
 
+TEST(TrolleyControl, CrossTrackIntegratorWindsUpAndCorrects)
+{
+	const TrolleyPathState right_of_path =
+		calculateStraightPathState(Vector2f{0.f, 0.f}, 0.f, Vector2f{5.f, 1.f});  // 1 m right of the line
+	ASSERT_TRUE(right_of_path.valid);
+	EXPECT_GT(right_of_path.error, 0.f);
+
+	// Disabled by default: the integrator stays at zero and does not touch the command.
+	const TrolleyControlOutput no_integral = calculateTrolleyControl(right_of_path, 0.f, 5.f, defaultConfig());
+	EXPECT_NEAR(no_integral.cross_track_integrator, 0.f, 1.e-6f);
+
+	TrolleyControlConfig config = defaultConfig();
+	config.integral_gain = 0.1f;
+	config.integral_limit = math::radians(10.f);
+	config.feedback_dt = 0.1f;
+
+	// Iterate, feeding the integrator back in as the control loop does with a sustained right-of-line error.
+	float integrator = 0.f;
+	float steering_first = 0.f;
+	float steering_last = 0.f;
+
+	for (int i = 0; i < 50; ++i) {
+		config.cross_track_integrator = integrator;
+		const TrolleyControlOutput out = calculateTrolleyControl(right_of_path, 0.f, 5.f, config);
+		ASSERT_TRUE(out.valid);
+		integrator = out.cross_track_integrator;
+
+		if (i == 0) {
+			steering_first = out.normalized_steering;
+		}
+
+		steering_last = out.normalized_steering;
+	}
+
+	// A sustained positive (right-of-line) error winds the integrator positive and adds corrective
+	// (leftward, negative) steering, so the command grows more negative than the first step.
+	EXPECT_GT(integrator, 0.f);
+	EXPECT_LT(steering_last, steering_first);
+
+	// The anti-windup clamp bounds the integrator at TROLLEY_ITK_LIM.
+	EXPECT_LE(integrator, math::radians(10.f) + 1.e-6f);
+
+	// A sane control step is required: a stalled/absent dt must not integrate.
+	TrolleyControlConfig no_dt = config;
+	no_dt.feedback_dt = NAN;
+	no_dt.cross_track_integrator = 0.f;
+	EXPECT_NEAR(calculateTrolleyControl(right_of_path, 0.f, 5.f, no_dt).cross_track_integrator, 0.f, 1.e-6f);
+}
+
 TEST(TrolleyControl, CircularPathUsesReferenceOffset)
 {
 	const float radius = 10.f;

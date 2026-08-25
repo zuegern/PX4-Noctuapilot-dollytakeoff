@@ -173,9 +173,33 @@ TrolleyControlOutput calculateTrolleyControl(const TrolleyPathState &path, const
 
 	output.feedback_speed_scale = feedback_speed_scale;
 
+	// Cross-track integral. A constant heading-estimate bias otherwise settles the trolley at a fixed
+	// offset (error ~ -tan(bias) / cross_track_gain, seen in the RTK ground-roll logs); integrating the
+	// cm-accurate cross-track error drives that residual out. Accumulate only while the feedback is faded
+	// in and the step is sane, then clamp the integrator (conditional integration) so a saturated command
+	// or a stuck estimate cannot wind it up. The integrator is a heading-equivalent angle added alongside
+	// the heading error, so it fades with speed like the rest of the feedback.
+	static constexpr float kMaxFeedbackDt = 0.2f;
+	float integrator = PX4_ISFINITE(config.cross_track_integrator) ? config.cross_track_integrator : 0.f;
+
+	if (PX4_ISFINITE(config.integral_gain) && config.integral_gain > FLT_EPSILON
+	    && PX4_ISFINITE(config.feedback_dt) && config.feedback_dt > 0.f && config.feedback_dt < kMaxFeedbackDt
+	    && PX4_ISFINITE(path.error) && feedback_speed_scale > FLT_EPSILON) {
+		integrator += config.integral_gain * feedback_speed_scale * path.error * config.feedback_dt;
+	}
+
+	if (PX4_ISFINITE(config.integral_limit) && config.integral_limit > 0.f) {
+		integrator = math::constrain(integrator, -config.integral_limit, config.integral_limit);
+
+	} else {
+		integrator = 0.f;
+	}
+
+	output.cross_track_integrator = integrator;
+
 	// Negative heading/cross-track feedback with a smooth steering-angle saturation.
 	const float feedback_input = -config.heading_gain * feedback_speed_scale
-				     * (output.heading_error + atanf(config.cross_track_gain * path.error));
+				     * (output.heading_error + atanf(config.cross_track_gain * path.error) + integrator);
 	output.feedback_angle = 2.f * output.steering_limit / M_PI_F
 				* atanf(M_PI_F * feedback_input / (2.f * output.steering_limit));
 	output.steering_angle = math::constrain(output.feedforward_angle + output.feedback_angle,

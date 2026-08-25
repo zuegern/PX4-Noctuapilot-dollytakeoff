@@ -135,7 +135,7 @@ public:
 	float openLoopWheelSteeringSetpoint(const float longitudinal_speed) const;
 
 	TrolleyControlOutput pathTrackingWheelSteeringSetpoint(const TrolleyPathState &path_state, const float yaw,
-			const float longitudinal_speed) const;
+			const float longitudinal_speed, const hrt_abstime now);
 
 	float maximumPathError() const { return param_trolley_xtk_max_.get(); }
 
@@ -210,6 +210,10 @@ private:
 
 	hrt_abstime time_last_steering_update_{0};
 
+	hrt_abstime time_last_control_update_{0};
+
+	float cross_track_integrator_{0.f};
+
 	hrt_abstime release_condition_met_since_{0};
 
 	hrt_abstime align_condition_met_since_{0};
@@ -241,6 +245,8 @@ private:
 		(ParamFloat<px4::params::TROLLEY_STR_RATE>) param_trolley_str_rate_,
 		(ParamFloat<px4::params::TROLLEY_STR_VLO>) param_trolley_str_vlo_,
 		(ParamFloat<px4::params::TROLLEY_STR_VHI>) param_trolley_str_vhi_,
+		(ParamFloat<px4::params::TROLLEY_ITK_GAIN>) param_trolley_itk_gain_,
+		(ParamFloat<px4::params::TROLLEY_ITK_LIM>) param_trolley_itk_lim_,
 		(ParamFloat<px4::params::TROLLEY_STR_HOLD>) param_trolley_str_hold_,
 		(ParamBool<px4::params::FW_W_EN>) param_fw_w_en_,
 		(ParamFloat<px4::params::FW_W_RMAX>) param_fw_w_rmax_

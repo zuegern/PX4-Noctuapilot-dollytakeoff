@@ -65,6 +65,8 @@ namespace trolleytakeoff
 		takeoff_time_ = 0;
 		ramp_start_time_ = time_now;
 		time_last_steering_update_ = time_now;
+		time_last_control_update_ = 0;
+		cross_track_integrator_ = 0.f;
 		release_condition_met_since_ = 0;
 		align_condition_met_since_ = 0;
 		trolley_link_healthy_ = true;
@@ -426,9 +428,51 @@ namespace trolleytakeoff
 	}
 
 	TrolleyControlOutput TrolleyTakeoff::pathTrackingWheelSteeringSetpoint(const TrolleyPathState &path_state,
-			const float yaw, const float longitudinal_speed) const
+			const float yaw, const float longitudinal_speed, const hrt_abstime now)
 	{
-		return calculateTrolleyControl(path_state, yaw, longitudinal_speed, controlConfig());
+		TrolleyControlConfig config = controlConfig();
+
+		// Run the cross-track integrator only for direct path tracking (it corrects the normalized steering
+		// output; PX4 PIFF steers from a yaw setpoint the integral does not touch), and only during the
+		// accelerating/clamped ground roll: never during the alignment taxi (which deliberately arcs off the
+		// line) and never after release. Outside that window the integrator is held at zero so each run
+		// starts clean and no stale bias leaks in.
+		const bool integrate = param_trolley_str_mode_.get() == TrolleySteeringMode::STEERING_PATH_TRACKING
+				       && takeoff_state_ >= TrolleyTakeoffState::THROTTLE_RAMP
+				       && takeoff_state_ < TrolleyTakeoffState::CLIMBOUT
+				       && !isAborted();
+
+		float dt = 0.f;
+
+		if (time_last_control_update_ != 0)
+		{
+			dt = math::max((now - time_last_control_update_) * 1.e-6f, 0.f);
+		}
+
+		time_last_control_update_ = now;
+
+		if (integrate)
+		{
+			config.integral_gain = param_trolley_itk_gain_.get();
+			config.integral_limit = math::radians(param_trolley_itk_lim_.get());
+			config.feedback_dt = dt;
+			config.cross_track_integrator = cross_track_integrator_;
+
+		}
+
+		else
+		{
+			cross_track_integrator_ = 0.f;
+		}
+
+		const TrolleyControlOutput output = calculateTrolleyControl(path_state, yaw, longitudinal_speed, config);
+
+		if (integrate && PX4_ISFINITE(output.cross_track_integrator))
+		{
+			cross_track_integrator_ = output.cross_track_integrator;
+		}
+
+		return output;
 	}
 
 	float TrolleyTakeoff::rotationAirspeedThreshold(const float takeoff_airspeed) const
@@ -563,6 +607,8 @@ namespace trolleytakeoff
 		takeoff_time_ = 0;
 		ramp_start_time_ = 0;
 		time_last_steering_update_ = 0;
+		time_last_control_update_ = 0;
+		cross_track_integrator_ = 0.f;
 		release_condition_met_since_ = 0;
 		align_condition_met_since_ = 0;
 		trolley_link_healthy_ = true;

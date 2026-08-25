@@ -1761,6 +1761,58 @@ FixedWingModeManager::abortTrolleyTakeoffForInvalidNavigation()
 	}
 }
 
+void
+FixedWingModeManager::warnTrolleyHeadingInconsistent(const hrt_abstime now)
+{
+	// The EKF heading flag only reports that the estimate is usable, not that it is unbiased. On a
+	// vehicle without a magnetometer the heading re-converges from GPS motion after a reboot/calibration,
+	// so the first run or two can steer to a heading that is a few degrees off while still "valid". That
+	// bias is the dominant source of ground-roll drift, so compare the estimated heading against the GPS
+	// ground track once moving and warn the operator; this is advisory only and never aborts.
+	static constexpr float kMinCourseSpeed = 1.0f;   // [m/s] ground course is meaningless below this
+	static constexpr hrt_abstime kHoldTime = 1_s;    // sustain before warning, rejects GPS-course noise
+
+	const float threshold_deg = _param_trolley_hdg_chk.get();
+
+	if (threshold_deg <= FLT_EPSILON
+	    || !_trolley_takeoff.navigationSteeringEnabled()
+	    || _trolley_takeoff.isReleased()
+	    || _trolley_takeoff.isAborted()
+	    || _trolley_heading_warned) {
+		return;
+	}
+
+	const bool velocity_finite = PX4_ISFINITE(_local_pos.vx) && PX4_ISFINITE(_local_pos.vy);
+	const float ground_speed = velocity_finite ?
+				   sqrtf(_local_pos.vx * _local_pos.vx + _local_pos.vy * _local_pos.vy) : NAN;
+
+	if (!velocity_finite || !PX4_ISFINITE(_yaw) || !(ground_speed >= kMinCourseSpeed)) {
+		_trolley_heading_offset_since = 0;
+		return;
+	}
+
+	const float ground_course = atan2f(_local_pos.vy, _local_pos.vx);
+	const float heading_offset = wrap_pi(_yaw - ground_course);
+
+	if (fabsf(heading_offset) < math::radians(threshold_deg)) {
+		_trolley_heading_offset_since = 0;
+		return;
+	}
+
+	if (_trolley_heading_offset_since == 0) {
+		_trolley_heading_offset_since = now;
+		return;
+	}
+
+	if ((now - _trolley_heading_offset_since) >= kHoldTime) {
+		_trolley_heading_warned = true;
+		// STATUSTEXT rather than an event, so it reliably crosses the lossy telemetry radio to the operator.
+		mavlink_log_critical(&_mavlink_log_pub,
+				     "Trolley heading %.0f deg off GPS track - estimate unsettled, run may drift; redo after a warm-up pass",
+				     (double)math::degrees(heading_offset));
+	}
+}
+
 trolleytakeoff::TrolleyPathState
 FixedWingModeManager::trolleyPathState(const Vector2f &start_pos_local, const float takeoff_bearing,
 				      const Vector2f &vehicle_pos) const
@@ -2084,6 +2136,8 @@ FixedWingModeManager::control_auto_takeoff(const hrt_abstime &now, const float c
 			_takeoff_init_position = global_position;
 			_takeoff_ground_alt = _current_altitude;
 			_launch_current_yaw = _yaw;
+			_trolley_heading_warned = false;
+			_trolley_heading_offset_since = 0;
 			// _airspeed_slew_rate_controller.setForcedValue(takeoff_airspeed); // TODO
 
 			events::send(events::ID("fixedwing_position_control_trolley_takeoff"), events::Log::Info, "Takeoff on trolley");
@@ -2150,10 +2204,12 @@ FixedWingModeManager::control_auto_takeoff(const hrt_abstime &now, const float c
 
 				if (_trolley_takeoff.navigationSteeringEnabled()) {
 					trolley_control_output = _trolley_takeoff.pathTrackingWheelSteeringSetpoint(
-								 trolley_path_state, _yaw, estimated_longitudinal_speed);
+								 trolley_path_state, _yaw, estimated_longitudinal_speed, now);
 					abortTrolleyTakeoffForPathControl(trolley_path_state, trolley_control_output);
 				}
 			}
+
+			warnTrolleyHeadingInconsistent(now);
 
 			const bool was_aligning_to_path = _trolley_takeoff.isAligningToPath();
 

@@ -59,6 +59,13 @@ struct TrolleyControlConfig {
 	// the speed at which it reaches full authority. Leave non-finite / non-positive to disable the fade.
 	float feedback_speed_zero{NAN};
 	float feedback_speed_full{NAN};
+	// Cross-track integral. Cancels the steady-state offset a constant heading-estimate bias would
+	// otherwise leave (offset ~ -tan(bias) / cross_track_gain). Disabled unless integral_gain,
+	// integral_limit and feedback_dt are all finite and positive.
+	float integral_gain{NAN};          // [rad/(m*s)] integral gain on the cross-track error
+	float integral_limit{NAN};         // [rad] anti-windup clamp on the accumulated integrator
+	float feedback_dt{NAN};            // [s] control step used to integrate this cycle
+	float cross_track_integrator{0.f}; // [rad] integrator carried in from the previous step
 };
 
 struct TrolleyControlOutput {
@@ -73,6 +80,7 @@ struct TrolleyControlOutput {
 	float yaw_rate_feedforward{NAN};
 	float minimum_cross_track_gain{NAN};
 	float feedback_speed_scale{NAN}; // [0,1] speed-dependent scaling applied to the closed-loop feedback
+	float cross_track_integrator{NAN}; // [rad] updated integrator to carry to the next step
 	bool path_feasible{false};
 	bool stability_condition_met{false};
 	bool valid{false};
