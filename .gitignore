@@ -110,6 +110,10 @@ src/systemcmds/topic_listener/listener_generated.cpp
 log/
 keys/
 
+# local-only backup bundles and IDE config, never shared via git
+/backups/
+.theia/
+
 # metadata
 _emscripten_sdk/
 
