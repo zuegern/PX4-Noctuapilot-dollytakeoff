@@ -381,6 +381,7 @@ private:
 	bool _trolley_was_armed{false};
 	hrt_abstime _trolley_heading_offset_since{0};
 	bool _trolley_heading_warned{false};
+	hrt_abstime _trolley_nav_invalid_since{0};
 	landing_gear_wheel_s _trolley_heading_wheel_output{};
 	hrt_abstime _last_trolley_debug_publish{0};
 	Vector2f _trolley_debug_start_pos_local{NAN, NAN};
@@ -688,7 +689,7 @@ private:
 	uint8_t trolleyRunwayControlState() const;
 	bool trolleyPathNavigationValid() const;
 	void abortTrolleyTakeoffForInvalidSteeringConfiguration();
-	void abortTrolleyTakeoffForInvalidNavigation();
+	void abortTrolleyTakeoffForInvalidNavigation(const hrt_abstime &now);
 	void warnTrolleyHeadingInconsistent(const hrt_abstime now);
 	trolleytakeoff::TrolleyPathState trolleyPathState(const Vector2f &start_pos_local, const float takeoff_bearing,
 			const Vector2f &vehicle_pos) const;

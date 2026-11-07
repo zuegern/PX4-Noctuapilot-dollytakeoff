@@ -1749,12 +1749,32 @@ FixedWingModeManager::abortTrolleyTakeoffForInvalidSteeringConfiguration()
 }
 
 void
-FixedWingModeManager::abortTrolleyTakeoffForInvalidNavigation()
+FixedWingModeManager::abortTrolleyTakeoffForInvalidNavigation(const hrt_abstime &now)
 {
-	if (_trolley_takeoff.navigationSteeringEnabled()
-	    && !_trolley_takeoff.isReleased()
-	    && !_trolley_takeoff.isAborted()
-	    && !trolleyPathNavigationValid()) {
+	// A single bad EKF cycle (e.g. a position/heading reset from ground-roll vibration) must not
+	// permanently abort the takeoff while still clamped to the trolley; require the invalid
+	// navigation condition to persist briefly before acting, mirroring the debounce already used
+	// for the alignment/release conditions and the heading-consistency warning above.
+	static constexpr hrt_abstime kNavInvalidHoldTime = 200_ms;
+
+	if (!_trolley_takeoff.navigationSteeringEnabled()
+	    || _trolley_takeoff.isReleased()
+	    || _trolley_takeoff.isAborted()) {
+		_trolley_nav_invalid_since = 0;
+		return;
+	}
+
+	if (trolleyPathNavigationValid()) {
+		_trolley_nav_invalid_since = 0;
+		return;
+	}
+
+	if (_trolley_nav_invalid_since == 0) {
+		_trolley_nav_invalid_since = now;
+		return;
+	}
+
+	if ((now - _trolley_nav_invalid_since) >= kNavInvalidHoldTime) {
 		events::send(events::ID("trolley_takeoff_navigation_invalid"), events::Log::Critical,
 			     "Trolley path control lost navigation, aborting takeoff");
 		_trolley_takeoff.abort();
@@ -2197,7 +2217,7 @@ FixedWingModeManager::control_auto_takeoff(const hrt_abstime &now, const float c
 
 		if (trolley_takeoff_enabled) {
 			abortTrolleyTakeoffForInvalidSteeringConfiguration();
-			abortTrolleyTakeoffForInvalidNavigation();
+			abortTrolleyTakeoffForInvalidNavigation(now);
 
 			if (!_trolley_takeoff.isAborted()) {
 				trolley_path_state = trolleyPathState(start_pos_local, takeoff_bearing, local_2D_position);
@@ -2515,7 +2535,7 @@ FixedWingModeManager::control_auto_takeoff_no_nav(const hrt_abstime &now, const 
 
 		if (trolley_takeoff_enabled) {
 			abortTrolleyTakeoffForInvalidSteeringConfiguration();
-			abortTrolleyTakeoffForInvalidNavigation();
+			abortTrolleyTakeoffForInvalidNavigation(now);
 			_trolley_takeoff.update(now, takeoff_airspeed, _airspeed_eas, estimated_ground_speed,
 						_current_altitude - _takeoff_ground_alt, clearance_altitude_amsl - _takeoff_ground_alt,
 						trolley_control_output.heading_error, trolley_link_required, trolley_link_healthy);

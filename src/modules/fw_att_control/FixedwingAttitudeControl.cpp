@@ -432,10 +432,13 @@ void FixedwingAttitudeControl::Run()
 		} else {
 			_wheel_ctrl.reset_integrator();
 			_steering_wheel_yaw_setpoint = NAN;
-			// A finite direct setpoint marks trolley control. Keep its detached trolley wheels centered,
-			// while preserving the existing manual-yaw behavior for other fixed-wing modes.
-			wheel_u = runway_control_recent && PX4_ISFINITE(runway_control.wheel_steering_setpoint) ?
-				  0.f : _manual_control_setpoint.yaw;
+			// wheel_steering_direct marks an explicit direct/centering command (e.g. detached trolley
+			// wheels). Only that case overrides the manual yaw stick; checking finiteness of
+			// wheel_steering_setpoint instead would also match its default-zeroed value from
+			// unrelated publishers (e.g. landing control), silently defeating manual wheel steering.
+			wheel_u = runway_control_recent && runway_control.wheel_steering_direct ?
+				  (PX4_ISFINITE(runway_control.wheel_steering_setpoint) ? runway_control.wheel_steering_setpoint : 0.f) :
+				  _manual_control_setpoint.yaw;
 		}
 
 		_landing_gear_wheel.normalized_wheel_setpoint =
